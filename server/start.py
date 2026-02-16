@@ -60,14 +60,6 @@ if LIMITER_AVAILABLE and os.getenv('RATE_LIMIT_ENABLED', 'true').lower() == 'tru
         key_func=get_remote_address,
         default_limits=[f"{os.getenv('RATE_LIMIT_PER_MINUTE', '60')}/minute"]
     )
-    
-    # Special rate limiting for code execution endpoint
-    @limiter.limit("10/minute")  # Stricter limit for code execution
-    @app.route('/execute', methods=['POST'])
-    @token_required
-    def execute_code_limited(current_user):
-        """Rate-limited code execution endpoint"""
-        return execute_code_internal(current_user)
 
 count = 0
 lock = threading.Lock()
