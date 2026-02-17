@@ -108,12 +108,15 @@ def validate_code_safety(code: str) -> None:
         # Check for dangerous imports
         if isinstance(node, ast.Import):
             for alias in node.names:
-                if alias.name in DANGEROUS_IMPORTS:
+                root_module = alias.name.split('.')[0]
+                if root_module in DANGEROUS_IMPORTS:
                     raise SecurityError(f"Import of restricted module: {alias.name}")
         
         elif isinstance(node, ast.ImportFrom):
-            if node.module in DANGEROUS_IMPORTS:
-                raise SecurityError(f"Import from restricted module: {node.module}")
+            if node.module:
+                root_module = node.module.split('.')[0]
+                if root_module in DANGEROUS_IMPORTS:
+                    raise SecurityError(f"Import from restricted module: {node.module}")
         
         # Check for dangerous function calls
         elif isinstance(node, ast.Call):
