@@ -296,23 +296,6 @@ export default function Home() {
         initializeServer();
     }, [initializeServer]);
 
-    function generateUnsafeUUID() {
-        return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, c => {
-            const r = Math.random() * 16 | 0
-            const v = c === 'x' ? r : (r & 0x3 | 0x8)
-            return v.toString(16)
-        })
-    }
-
-    function HandleChat() {
-        if (chatId == null) {
-            var id = generateUnsafeUUID()
-            setChatId(id)
-            return id
-        }
-        return chatId
-    }
-
     function ChatHistoryKeyboardHandler(event) {
         if (event.key == "ArrowUp") {
             if (selectedItem == 0) return;
@@ -730,17 +713,6 @@ export default function Home() {
     useEffect(() => {
         setSelectedItem(0)
     }, [chatHistoryInputText])
-
-    const [mountedIframe] = useState(() => {
-        try {
-            eval("document")
-        } catch { return "" }
-        const el = eval("document").createElement("iframe");
-        el.src = codeServerURL;
-        el.style.width = "100%";
-        el.style.height = "100%";
-        return el;
-    });
 
     useEffect(() => {
         mountedIframe.src = codeServerURL;
