@@ -15,6 +15,7 @@ from server.utils.validators import (
     sanitize_input,
     validate_password
 )
+from server.utils.sentry_config import capture_exception_with_context
 from datetime import datetime
 
 auth_bp = Blueprint('auth', __name__, url_prefix='/api/auth')
@@ -65,8 +66,17 @@ def register():
         
     except Exception as e:
         db.session.rollback()
+        # Capture exception with Sentry
+        event_id = capture_exception_with_context(e,
+            endpoint="auth_register",
+            email=data.get('email', 'unknown') if 'data' in locals() else 'unknown'
+        )
         print(f"Registration error: {str(e)}")
-        return jsonify({'success': False, 'error': 'An error occurred during registration'}), 500
+        return jsonify({
+            'success': False, 
+            'error': 'An error occurred during registration',
+            'event_id': event_id
+        }), 500
 
 
 @auth_bp.route('/login', methods=['POST'])
@@ -107,8 +117,17 @@ def login():
         }), 200
         
     except Exception as e:
+        # Capture exception with Sentry
+        event_id = capture_exception_with_context(e,
+            endpoint="auth_login",
+            login_attempt=data.get('login', 'unknown') if 'data' in locals() else 'unknown'
+        )
         print(f"Login error: {str(e)}")
-        return jsonify({'success': False, 'error': 'An error occurred during login'}), 500
+        return jsonify({
+            'success': False, 
+            'error': 'An error occurred during login',
+            'event_id': event_id
+        }), 500
 
 
 @auth_bp.route('/refresh', methods=['POST'])

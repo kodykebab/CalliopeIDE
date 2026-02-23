@@ -1,0 +1,12 @@
+{
+  "/_error": "pages/_error.js",
+  "/_document": "pages/_document.js",
+  "/app/_document": "pages/app/_document.js",
+  "/app": "pages/app.js",
+  "/": "pages/index.js",
+  "/pricing/_document": "pages/pricing/_document.js",
+  "/pricing": "pages/pricing.js",
+  "/_app": "pages/_app.js",
+  "/app/_app": "pages/app/_app.js",
+  "/pricing/_app": "pages/pricing/_app.js"
+}
