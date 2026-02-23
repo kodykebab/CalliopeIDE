@@ -1,6 +1,6 @@
 import { Button, Modal, useDisclosure, ModalContent, ModalHeader, ModalBody, Input, ModalFooter, Checkbox, Tooltip } from "@heroui/react";
-import { CircleStop, CircleArrowUp, ArrowDown, ArrowRightToLine } from "lucide-react"
-import { useEffect, useState, useRef } from "react";
+import { CircleStop, CircleArrowUp, ArrowDown, ArrowRightToLine, AlertCircle } from "lucide-react"
+import { useEffect, useState, useRef, useCallback } from "react";
 import { streamGeminiResponse } from "../../scripts/streamer"
 import ReactMarkdown from 'react-markdown';
 import remarkMath from 'remark-math';
@@ -9,6 +9,68 @@ import 'github-markdown-css'
 import ClickSpark from "../../scripts/clickspark"
 import { useRouter } from "next/router";
 import 'katex/dist/katex.min.css'
+// Import utilities with fallback for SSR
+let apiClient, useApiCall, handleApiError, withErrorHandling, LoadingSpinner, InlineSpinner, ErrorAlert, useToast, ErrorBoundary;
+
+try {
+    const apiModule = require('@/utils/apiClient');
+    apiClient = apiModule.apiClient;
+    useApiCall = apiModule.useApiCall;
+    
+    const errorModule = require('@/utils/errorHandler');
+    handleApiError = errorModule.handleApiError;
+    withErrorHandling = errorModule.withErrorHandling;
+    
+    const loadingModule = require('@/components/LoadingSpinner');
+    LoadingSpinner = loadingModule.LoadingSpinner || loadingModule.default;
+    InlineSpinner = loadingModule.InlineSpinner;
+    
+    const alertModule = require('@/components/ErrorAlert');
+    ErrorAlert = alertModule.ErrorAlert || alertModule.default;
+    useToast = alertModule.useToast;
+    
+    const boundaryModule = require('@/components/ErrorBoundary');
+    ErrorBoundary = boundaryModule.ErrorBoundary || boundaryModule.default;
+} catch (e) {
+    console.warn('Some utilities could not be loaded:', e);
+    // Provide fallbacks
+    LoadingSpinner = ({ children }) => children || null;
+    InlineSpinner = () => null;
+    ErrorAlert = () => null;
+    ErrorBoundary = ({ children }) => children;
+    useToast = () => ({ error: console.error, success: console.log, warning: console.warn });
+    handleApiError = (err) => ({ message: err?.message || 'An error occurred' });
+}
+
+// Safe localStorage wrapper
+const safeLocalStorage = {
+    getItem: (key) => {
+        try {
+            return typeof window !== 'undefined' ? window.localStorage?.getItem(key) : null;
+        } catch (e) {
+            console.warn('localStorage access failed:', e);
+            return null;
+        }
+    },
+    setItem: (key, value) => {
+        try {
+            if (typeof window !== 'undefined' && window.localStorage) {
+                window.localStorage.setItem(key, value);
+            }
+        } catch (e) {
+            console.warn('localStorage write failed:', e);
+        }
+    },
+    removeItem: (key) => {
+        try {
+            if (typeof window !== 'undefined' && window.localStorage) {
+                window.localStorage.removeItem(key);
+            }
+        } catch (e) {
+            console.warn('localStorage remove failed:', e);
+        }
+    }
+};
 
 
 const MarkdownComponent = (content) => {
@@ -49,6 +111,7 @@ const ModelMessage = MarkdownComponent
 export default function Home() {
     var host = "http://127.0.0.1"
     const router = useRouter();
+    const toast = useToast();
     const [inputContent, setInputContent] = useState("")
     const [serverURL, setServerURL] = useState("")
     const [codeServerURL, setCodeServerURL] = useState("")
@@ -56,18 +119,50 @@ export default function Home() {
     var [chatId, setChatId] = useState(null)
     const { isOpen, onOpen, onOpenChange } = useDisclosure()
     const { isOpen: ChatHistoryModalIsOpen, onOpen: ChatHistoryModalOnOpen, onOpenChange: ChatHistoryModalOnOpenChange, onClose: ChatHistoryModalOnClose } = useDisclosure()
-    var KeyStateDefault = ""
-    try {
-        KeyStateDefault = eval("localStorage")?.getItem("geminiAPIKey")
-    } catch { }
-    const [modalAPIKeyValue, setModalAPIKeyValue] = useState(KeyStateDefault)
+    
+    // Safe localStorage access
+    const [modalAPIKeyValue, setModalAPIKeyValue] = useState(() => {
+        try {
+            return typeof window !== 'undefined' ? localStorage?.getItem("geminiAPIKey") || "" : "";
+        } catch {
+            return "";
+        }
+    });
+    
     const [isResponding, setIsResponding] = useState(false)
+    const [isSendingMessage, setIsSendingMessage] = useState(false)
+    const [isLoadingServer, setIsLoadingServer] = useState(false)
     const [currentStream, setCurrentStream] = useState(null)
-    var proDefault = false
-    try {
-        proDefault = eval("localStorage")?.getItem("usingPro") == "true"
-    } catch { }
-    const [usingPro, setIsUsingPro] = useState(proDefault)
+    const [serverError, setServerError] = useState(null)
+    
+    const [usingPro, setIsUsingPro] = useState(() => {
+        try {
+            return typeof window !== 'undefined' ? localStorage?.getItem("usingPro") === "true" : false;
+        } catch {
+            return false;
+        }
+    });
+
+    // Additional state for chat history
+    const [selectedItem, setSelectedItem] = useState(0);
+    const [ChatHistoryQueryResults, setChatHistoryQueryResults] = useState([]);
+    const [chatHistoryInputText, setChatHistoryInputText] = useState("");
+    const prevScrollTop = useRef(0);
+    
+    // Mounted iframe state
+    const [mountedIframe] = useState(() => {
+        try {
+            if (typeof document !== 'undefined') {
+                const el = document.createElement("iframe");
+                el.style.width = "100%";
+                el.style.height = "100%";
+                return el;
+            }
+        } catch {
+            return null;
+        }
+        return null;
+    });
 
     const chatboxRef = useRef(null);
     const [autoScroll, setAutoScroll] = useState(true);
@@ -81,31 +176,125 @@ export default function Home() {
 
     useEffect(() => {
         setTimeout(() => {
-            document.querySelector("textarea").focus()
-        }, 10)
-    }, [])
+            const textarea = document.querySelector("textarea");
+            if (textarea) {
+                textarea.focus();
+            }
+        }, 10);
+    }, []);
 
+    function generateUnsafeUUID() {
+        return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, c => {
+            const r = Math.random() * 16 | 0;
+            const v = c === 'x' ? r : (r & 0x3 | 0x8);
+            return v.toString(16);
+        });
+    }
+
+    function HandleChat() {
+        if (chatId == null) {
+            const id = generateUnsafeUUID();
+            setChatId(id);
+            return id;
+        }
+        return chatId;
+    }
+
+    // Load chat from URL parameter with error handling
     useEffect(() => {
-        const id = router.query.id
-        if (id) {
-            var storageChat = window.localStorage.getItem(id)
-            if (storageChat) {
-                setChatId(id)
-                setCurrentChat(JSON.parse(storageChat))
-                const el = document.getElementById("chatbox");
-                const here = el.scrollTop;
-                el.scrollTo({ top: here, behavior: "instant" });
+        const loadChatFromUrl = async () => {
+            const id = router.query.id;
+            if (!id) return;
+            
+            try {
+                const storageChat = safeLocalStorage.getItem(id);
+                if (storageChat) {
+                    const parsedChat = JSON.parse(storageChat);
+                    setChatId(id);
+                    setCurrentChat(parsedChat);
+                    
+                    // Scroll to position after content loads
+                    setTimeout(() => {
+                        const el = document.getElementById("chatbox");
+                        if (el) {
+                            const here = el.scrollTop;
+                            el.scrollTo({ top: here, behavior: "instant" });
+                        }
+                    }, 100);
+                } else {
+                    toast.warning('Chat not found. Starting a new conversation.');
+                }
+            } catch (error) {
+                const errorInfo = handleApiError(error);
+                toast.error('Failed to load chat: ' + errorInfo.message);
+                console.error('Chat loading failed:', error);
+            }
+        };
+        
+        loadChatFromUrl();
+    }, [router.query.id, toast]);
+
+    // Safe localStorage operations
+    const safeLocalStorage = {
+        getItem: (key) => {
+            try {
+                return typeof window !== 'undefined' ? window.localStorage?.getItem(key) : null;
+            } catch (error) {
+                console.warn('localStorage access failed:', error);
+                return null;
+            }
+        },
+        setItem: (key, value) => {
+            try {
+                if (typeof window !== 'undefined') {
+                    window.localStorage?.setItem(key, value);
+                    return true;
+                }
+            } catch (error) {
+                console.warn('localStorage write failed:', error);
+                toast.error('Unable to save data locally. Some features may not work properly.');
+            }
+            return false;
+        },
+        removeItem: (key) => {
+            try {
+                if (typeof window !== 'undefined') {
+                    window.localStorage?.removeItem(key);
+                }
+            } catch (error) {
+                console.warn('localStorage removal failed:', error);
             }
         }
-    }, [router.query.id])
+    };
+
+    // Initialize server connection with error handling
+    const initializeServer = useCallback(async () => {
+        setIsLoadingServer(true);
+        setServerError(null);
+        
+        try {
+            const response = await apiClient.get(host + ":5000/");
+            
+            if (response.success && response.data) {
+                setServerURL(host + ":" + response.data.port);
+                setCodeServerURL(host + ":" + "8080/?folder=" + response.data.location);
+                toast.success('Server connected successfully');
+            } else {
+                throw new Error(response.error || 'Failed to get server information');
+            }
+        } catch (error) {
+            const errorInfo = handleApiError(error);
+            setServerError(errorInfo.message);
+            toast.error(errorInfo.message);
+            console.error('Server initialization failed:', error);
+        } finally {
+            setIsLoadingServer(false);
+        }
+    }, [host, toast]);
 
     useEffect(() => {
-        (async () => {
-            var data = await (await fetch(host + ":5000/")).json()
-            setServerURL(host + ":" + data.port)
-            setCodeServerURL(host + ":" + "8080/?folder=" + data.location)
-        })()
-    }, [])
+        initializeServer();
+    }, [initializeServer]);
 
     function generateUnsafeUUID() {
         return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, c => {
@@ -164,95 +353,249 @@ export default function Home() {
         }
     }
 
-    function KeyboardListener(event) {
-        if (ChatHistoryModalIsOpen) {
-            ChatHistoryKeyboardHandler(event)
-            return
-        }
+    // Utility function for time formatting
+    function getGithubTimeDelta(unixTimestampSec) {
+        const seconds = Math.floor(Date.now() / 1000) - unixTimestampSec;
 
-        if (event.key === "Enter" && !event.shiftKey) {
-            if (inputContent == "") {
-                onOpen()
-                return
-            }
-
-            chatId = HandleChat()
-
-            setCurrentChat((currentChat) => {
-                var newChat = [...currentChat, { role: "user", parts: [{ text: inputContent }] }, { role: "model", parts: [{ text: "" }] }]
-                window.localStorage.setItem(chatId, JSON.stringify(newChat))
-                window.localStorage.setItem(chatId + "date", parseInt(Number(new Date()) / 1000).toString())
-                return newChat
-            })
-
-            setIsResponding(true)
-
-            setTimeout(() => {
-                setAutoScroll(true)
-            }, 10)
-
-            setInputContent("")
-
-            streamGeminiResponse(serverURL, [...currentChat, { role: "user", parts: [{ text: inputContent }] }], (x, id) => {
-                x = JSON.parse(x)
-                if (x.type != "output") return;
-                x = x.data + "\n\n"
-                setCurrentChat((prevChat) => {
-                    if (window.localStorage.getItem("readerId") != id) {
-                        return prevChat
-                    }
-                    const updatedChat = [...prevChat];
-                    const lastMessage = { ...updatedChat[updatedChat.length - 1] };
-                    const lastPart = { ...lastMessage.parts[0] };
-
-                    lastPart.text += x;
-                    lastMessage.parts = [lastPart];
-                    updatedChat[updatedChat.length - 1] = lastMessage;
-
-                    window.localStorage.setItem(chatId, JSON.stringify(updatedChat))
-
-                    window.localStorage.setItem(chatId + "date", parseInt(Number(new Date()) / 1000).toString())
-
-                    return updatedChat;
-                });
-            }, () => {
-                setIsResponding(false)
-            })
-            try { event.preventDefault() } catch { }
-        }
-
-        if (event.code == "Tab") {
-            ChatHistoryModalOnOpen()
-            event.preventDefault();
-        }
-
-        if (event.code == "Escape") {
-            localStorage.setItem("readerId", "")
-            setIsResponding(false)
-        }
-
-        if (event.key == "/") {
-            if (document.activeElement != document.querySelector("textarea")) {
-                event.preventDefault()
-                document.querySelector("textarea").focus()
-            }
+        if (seconds < 60) {
+            return "just now";
+        } else if (seconds < 3600) {
+            const mins = Math.floor(seconds / 60);
+            return `${mins} minute${mins !== 1 ? 's' : ''} ago`;
+        } else if (seconds < 86400) {
+            const hours = Math.floor(seconds / 3600);
+            return `${hours} hour${hours !== 1 ? 's' : ''} ago`;
+        } else if (seconds < 604800) {
+            const days = Math.floor(seconds / 86400);
+            return `${days} day${days !== 1 ? 's' : ''} ago`;
+        } else if (seconds < 2592000) {
+            const weeks = Math.floor(seconds / 604800);
+            return `${weeks} week${weeks !== 1 ? 's' : ''} ago`;
+        } else if (seconds < 31536000) {
+            const months = Math.floor(seconds / 2592000);
+            return `${months} month${months !== 1 ? 's' : ''} ago`;
+        } else {
+            const years = Math.floor(seconds / 31536000);
+            return `${years} year${years !== 1 ? 's' : ''} ago`;
         }
     }
 
-    var [selectedItem, setSelectedItem] = useState(0)
+    // Chat history keyboard handler
+    function ChatHistoryKeyboardHandler(event) {
+        try {
+            if (event.key === "ArrowUp") {
+                if (selectedItem === 0) return;
+                setSelectedItem(selectedItem - 1);
+            }
 
-    const [ChatHistoryQueryResults, setChatHistoryQueryResults] = useState([])
+            if (event.key === "ArrowDown") {
+                if (selectedItem === ChatHistoryQueryResults.length - 1) {
+                    return;
+                }
+                setSelectedItem(selectedItem + 1);
+            }
 
+            if (event.key === "Enter") {
+                try { event.preventDefault() } catch { }
+
+                if (ChatHistoryQueryResults.length === 0) {
+                    return;
+                }
+
+                setSelectedItem(0);
+                setChatHistoryInputText("");
+
+                if (ChatHistoryQueryResults[selectedItem].date === "Command") {
+                    commands[ChatHistoryQueryResults[selectedItem].title]();
+                    return;
+                }
+
+                safeLocalStorage.setItem("readerId", "");
+                setChatId(ChatHistoryQueryResults[selectedItem].id);
+                ChatHistoryModalOnClose();
+                setIsResponding(false);
+                router.push("/app?id=" + ChatHistoryQueryResults[selectedItem].id);
+            }
+
+            if (event.key === "Tab") {
+                ChatHistoryModalOnClose();
+            }
+        } catch (error) {
+            console.error('Chat history keyboard error:', error);
+        }
+    }
+
+    // Keyboard event handler with proper error handling
+    function KeyboardListener(event) {
+        try {
+            if (ChatHistoryModalIsOpen) {
+                ChatHistoryKeyboardHandler(event);
+                return;
+            }
+
+            if (event.key === "Enter" && !event.shiftKey) {
+                event.preventDefault();
+                sendMessage();
+                return;
+            }
+
+            if (event.code === "Tab") {
+                event.preventDefault();
+                ChatHistoryModalOnOpen();
+                return;
+            }
+
+            if (event.code === "Escape") {
+                safeLocalStorage.setItem("readerId", "");
+                setIsResponding(false);
+                return;
+            }
+
+            if (event.key === "/") {
+                const textarea = document.querySelector("textarea");
+                if (document.activeElement !== textarea && textarea) {
+                    event.preventDefault();
+                    textarea.focus();
+                }
+            }
+        } catch (error) {
+            console.error('Keyboard event error:', error);
+        }
+    }
+
+    // Add keyboard listeners
     useEffect(() => {
+        document.addEventListener("keydown", KeyboardListener);
+        return () => { document.removeEventListener("keydown", KeyboardListener) };
+    }, [inputContent, ChatHistoryModalIsOpen, selectedItem, ChatHistoryQueryResults]);
 
-        document.addEventListener("keydown", KeyboardListener)
+    // Reset selected item when query changes
+    useEffect(() => {
+        setSelectedItem(0);
+    }, [chatHistoryInputText]);
 
-        return () => { document.removeEventListener("keydown", KeyboardListener) }
-    }, [inputContent, ChatHistoryModalIsOpen, selectedItem, ChatHistoryQueryResults])
+    // Update iframe source
+    useEffect(() => {
+        if (mountedIframe && codeServerURL) {
+            mountedIframe.src = codeServerURL;
+        }
+    }, [codeServerURL, mountedIframe]);
 
-    const prevScrollTop = useRef(0);
+    // Calculate query input width for modal
+    let queryInputCurrentWidth = "";
+    if (ChatHistoryModalIsOpen) {
+        try {
+            const queryInput = document.getElementById("queryInput");
+            if (queryInput) {
+                queryInputCurrentWidth = queryInput.clientWidth + "px";
+            }
+        } catch { }
+    }
 
-    const [chatHistoryInputText, setChatHistoryInputText] = useState("")
+    // Send message with comprehensive error handling
+    const sendMessage = useCallback(async () => {
+                if (!inputContent.trim()) {
+                    onOpen();
+                    return;
+                }
+                
+                if (isSendingMessage || isResponding) {
+                    const toast = useToast();
+                    toast.warning('Please wait for the current message to complete.');
+                    return;
+                }
+                
+                if (!serverURL) {
+                    const toast = useToast();
+                    toast.error('Server not connected. Please wait for server initialization.');
+                    return;
+                }
+                
+                const currentChatId = HandleChat();
+                setIsSendingMessage(true);
+                setIsResponding(true);
+                const toast = useToast();
+                
+                try {
+                    // Add user message to chat
+                    const newUserMessage = { role: "user", parts: [{ text: inputContent }] };
+                    const newAssistantMessage = { role: "model", parts: [{ text: "" }] };
+                    const updatedChat = [...currentChat, newUserMessage, newAssistantMessage];
+                    
+                    setCurrentChat(updatedChat);
+                    
+                    // Save to localStorage safely
+                    safeLocalStorage.setItem(currentChatId, JSON.stringify(updatedChat));
+                    safeLocalStorage.setItem(currentChatId + "date", parseInt(Number(new Date()) / 1000).toString());
+                    
+                    // Clear input and set auto-scroll
+                    setInputContent("");
+                    setTimeout(() => setAutoScroll(true), 10);
+                    
+                    // Stream the response
+                    await streamGeminiResponse(
+                        serverURL,
+                        [...currentChat, newUserMessage],
+                        (chunk, id) => {
+                            try {
+                                const parsedChunk = JSON.parse(chunk);
+                                if (parsedChunk.type !== "output") return;
+                                
+                                const responseText = parsedChunk.data + "\n\n";
+                                
+                                setCurrentChat((prevChat) => {
+                                    if (safeLocalStorage.getItem("readerId") !== id) {
+                                        return prevChat;
+                                    }
+                                    
+                                    const updatedChat = [...prevChat];
+                                    const lastMessage = { ...updatedChat[updatedChat.length - 1] };
+                                    const lastPart = { ...lastMessage.parts[0] };
+                                    
+                                    lastPart.text += responseText;
+                                    lastMessage.parts = [lastPart];
+                                    updatedChat[updatedChat.length - 1] = lastMessage;
+                                    
+                                    // Save updated chat safely
+                                    safeLocalStorage.setItem(currentChatId, JSON.stringify(updatedChat));
+                                    safeLocalStorage.setItem(currentChatId + "date", parseInt(Number(new Date()) / 1000).toString());
+                                    
+                                    return updatedChat;
+                                });
+                            } catch (error) {
+                                console.warn('Chunk parsing error:', error);
+                                // Don't break the stream for parsing errors
+                            }
+                        },
+                        () => {
+                            setIsResponding(false);
+                            toast.success('Message sent successfully');
+                        },
+                        (error) => {
+                            // Handle streaming errors
+                            const errorInfo = handleApiError(error.originalError || error);
+                            toast.error('Streaming failed: ' + (error.message || errorInfo.message));
+                            setIsResponding(false);
+                        }
+                    );
+                } catch (error) {
+                    const errorInfo = handleApiError(error);
+                    toast.error('Failed to send message: ' + errorInfo.message);
+                    
+                    // Remove the failed assistant message
+                    setCurrentChat(prevChat => {
+                        if (prevChat.length >= 2) {
+                            return prevChat.slice(0, -1);
+                        }
+                        return prevChat;
+                    });
+                    
+                    setIsResponding(false);
+                    console.error('Message sending failed:', error);
+                } finally {
+                    setIsSendingMessage(false);
+                }
+            }, [inputContent, isSendingMessage, isResponding, serverURL, currentChat, onOpen]);
 
     function getGithubTimeDelta(unixTimestampSec) {
         const seconds = Math.floor(Date.now() / 1000) - unixTimestampSec;
@@ -280,17 +623,26 @@ export default function Home() {
         }
     }
 
+    // Start new chat with error handling
     function NewChat() {
-        setCurrentChat([])
-        setChatId(null)
-        ChatHistoryModalOnClose()
-        localStorage.setItem("readerId", "")
-        setIsResponding(false)
-        router.push("/")
-        setTimeout(() => {
-            document.querySelector("textarea").focus()
-        }, 10)
-        return
+        try {
+            setCurrentChat([]);
+            setChatId(null);
+            ChatHistoryModalOnClose();
+            safeLocalStorage.setItem("readerId", "");
+            setIsResponding(false);
+            router.push("/app");
+            
+            setTimeout(() => {
+                const textarea = document.querySelector("textarea");
+                if (textarea) {
+                    textarea.focus();
+                }
+            }, 100);
+        } catch (error) {
+            console.error('New chat error:', error);
+            toast.error('Failed to start new chat');
+        }
     }
 
     var commands = {
@@ -298,46 +650,75 @@ export default function Home() {
             onOpen()
         },
         "New Chat - Deletes the current chat": () => {
-            localStorage.removeItem(chatId + "date")
-            localStorage.removeItem(chatId)
-            NewChat()
+            try {
+                safeLocalStorage.removeItem(chatId + "date");
+                safeLocalStorage.removeItem(chatId);
+                NewChat();
+            } catch (error) {
+                console.error('Delete chat error:', error);
+                toast.error('Failed to delete chat');
+            }
         }
     }
 
+    // Search chat history with error handling
     function GetResults(query) {
-        try { eval("localStorage") } catch {
-            return
-        }
-        var results = {}
-        for (let index = 0; index < localStorage.length; index++) {
-            const key = localStorage.key(index);
-            if (key.endsWith("date")) {
-                var chat = localStorage.getItem(key.split("date")[0])
-                if (!chat.toLocaleLowerCase().includes(query.toLocaleLowerCase().trim())) {
-                    continue
+        try {
+            if (typeof window === 'undefined') return [];
+            
+            const results = {};
+            const localStorage = window.localStorage;
+            
+            if (!localStorage) return [];
+            
+            for (let index = 0; index < localStorage.length; index++) {
+                try {
+                    const key = localStorage.key(index);
+                    if (!key || !key.endsWith("date")) continue;
+                    
+                    const chatKey = key.split("date")[0];
+                    const chatData = safeLocalStorage.getItem(chatKey);
+                    
+                    if (!chatData) continue;
+                    
+                    const chat = JSON.parse(chatData);
+                    const searchText = chat[0]?.parts?.[0]?.text || '';
+                    
+                    if (!searchText.toLowerCase().includes(query.toLowerCase().trim())) {
+                        continue;
+                    }
+                    
+                    const date = parseInt(safeLocalStorage.getItem(key) || '0');
+                    results[date] = {
+                        date: getGithubTimeDelta(date),
+                        title: searchText,
+                        chat: chat,
+                        id: chatKey
+                    };
+                } catch (error) {
+                    console.warn('Error processing chat history item:', error);
+                    continue;
                 }
-                chat = JSON.parse(chat)
-                var date = parseInt(localStorage.getItem(key))
-                results[date] = { "date": getGithubTimeDelta(date), "title": chat[0].parts[0].text, "chat": chat, "id": key.split("date")[0] }
             }
+
+            const sortedResults = Object.keys(results)
+                .sort((a, b) => b - a)
+                .map(key => results[key]);
+
+            const filteredCommands = Object.keys(commands)
+                .filter(command => command.toLowerCase().includes(query.toLowerCase()))
+                .map(command => ({
+                    date: "Command",
+                    title: command,
+                    id: ""
+                }));
+
+            return [...filteredCommands, ...sortedResults];
+        } catch (error) {
+            console.error('Search error:', error);
+            toast.error('Failed to search chat history');
+            return [];
         }
-
-        var sortedResults = Object.keys(results)
-            .sort((a, b) => b - a)
-            .map(key => results[key]);
-
-        var filteredCommands = []
-
-        var commandsKeys = Object.keys(commands)
-
-        for (let index = 0; index < commandsKeys.length; index++) {
-            const element = commandsKeys[index];
-            if (element.toLocaleLowerCase().includes(query.toLocaleLowerCase())) {
-                filteredCommands.push({ "date": "Command", "title": element, "id": "" })
-            }
-        }
-
-        return [...filteredCommands]
     }
 
     useEffect(() => {
@@ -345,13 +726,6 @@ export default function Home() {
             setChatHistoryQueryResults(GetResults(chatHistoryInputText))
         }
     }, [ChatHistoryModalIsOpen, chatHistoryInputText])
-    var queryInputCurrentWidth = ""
-
-    if (ChatHistoryModalIsOpen) {
-        try {
-            queryInputCurrentWidth = document.getElementById("queryInput").clientWidth + "px"
-        } catch { }
-    }
 
     useEffect(() => {
         setSelectedItem(0)
@@ -373,43 +747,82 @@ export default function Home() {
     }, [codeServerURL]);
 
     return (
-        <ClickSpark>
-            <div style={{ minHeight: "100vh", width: "100vw", backgroundColor: "#111", overflowY: "auto", color: "white" }} ref={chatboxRef} id="chatbox" onScroll={(e) => {
-                if (!isResponding) {
-                    return
-                }
-                const curr = e.target.scrollTop;
-                if (curr + 10 < prevScrollTop.current) {
-                    console.log("scrolled up")
-                    setAutoScroll(false);
-                }
-                prevScrollTop.current = curr;
-            }}>
-                <div style={{ height: "76vh", "width": "100%" }}>
-                    <div style={{ height: "100%", width: "100%" }} className="flex justify-center items-center">
-                        <div style={{ height: "100%", width: "60%", marginTop: "50px" }}>
-                            {chatId == null ? <>
-                                <div style={{ height: "100%", width: "100%" }} className="flex justify-center items-center">
-                                    <div>
-                                        <h1 className="text-4xl mt-10 text-center">What's on your mind today?</h1>
-                                        <div className="flex justify-center items-center text-center" style={{ color: "#A1A1AA", marginTop: "14px" }}>
-                                            Press the Tab Key to open the Command Pallette
+        <ErrorBoundary>
+            <ClickSpark>
+                <div style={{ minHeight: "100vh", width: "100vw", backgroundColor: "#111", overflowY: "auto", color: "white" }} ref={chatboxRef} id="chatbox" onScroll={(e) => {
+                    if (!isResponding) {
+                        return
+                    }
+                    const curr = e.target.scrollTop;
+                    if (curr + 10 < prevScrollTop.current) {
+                        console.log("scrolled up")
+                        setAutoScroll(false);
+                    }
+                    prevScrollTop.current = curr;
+                }}>
+                    {/* Loading overlay for server initialization */}
+                    {isLoadingServer && (
+                        <div className="fixed inset-0 z-40 flex items-center justify-center bg-black/50 backdrop-blur-sm">
+                            <div className="bg-gray-800 rounded-lg p-6 shadow-lg border border-gray-600">
+                                <LoadingSpinner size="lg" text="Connecting to server..." className="text-white" />
+                            </div>
+                        </div>
+                    )}
+                    
+                    {/* Server error display */}
+                    {serverError && (
+                        <div className="fixed top-4 left-1/2 transform -translate-x-1/2 z-50 max-w-md">
+                            <ErrorAlert 
+                                variant="error" 
+                                title="Server Connection Failed" 
+                                message={serverError}
+                                closable={true}
+                                onClose={() => setServerError(null)}
+                            />
+                            <div className="mt-2 text-center">
+                                <Button 
+                                    size="sm" 
+                                    onClick={initializeServer}
+                                    disabled={isLoadingServer}
+                                    className="bg-blue-600 hover:bg-blue-700"
+                                >
+                                    {isLoadingServer ? <InlineSpinner className="mr-2" /> : null}
+                                    Retry Connection
+                                </Button>
+                            </div>
+                        </div>
+                    )}
+                    
+                    <div style={{ height: "76vh", "width": "100%" }}>
+                        <div style={{ height: "100%", width: "100%" }} className="flex justify-center items-center">
+                            <div style={{ height: "100%", width: "60%", marginTop: "50px" }}>
+                                {chatId == null ? (
+                                    <div style={{ height: "100%", width: "100%" }} className="flex justify-center items-center">
+                                        <div>
+                                            <h1 className="text-4xl mt-10 text-center">What's on your mind today?</h1>
+                                            <div className="flex justify-center items-center text-center" style={{ color: "#A1A1AA", marginTop: "14px" }}>
+                                                {isLoadingServer ? "Connecting to server..." : "Press the Tab Key to open the Command Palette"}
+                                            </div>
                                         </div>
                                     </div>
-                                </div>
-                            </> : ""}
-                            {currentChat.map((item, i) => {
-                                if (item.role == "user") {
-                                    return UserMessage(item.parts[0].text, Number(i), setInputContent, currentChat, setCurrentChat, setIsResponding)
-                                } else {
-                                    return ModelMessage(item.parts[0].text)
-                                }
-                            })}
-                            {isResponding && <p className="shiny-text">Calliope is working for you!</p>}
-                            <div style={{ height: "28vh" }}></div>
+                                ) : null}
+                                {currentChat.map((item, i) => {
+                                    if (item.role == "user") {
+                                        return UserMessage(item.parts[0].text, Number(i), setInputContent, currentChat, setCurrentChat, setIsResponding)
+                                    } else {
+                                        return ModelMessage(item.parts[0].text)
+                                    }
+                                })}
+                                {isResponding && (
+                                    <div className="flex items-center gap-3 mb-4">
+                                        <LoadingSpinner size="sm" />
+                                        <p className="shiny-text">Calliope is working for you!</p>
+                                    </div>
+                                )}
+                                <div style={{ height: "28vh" }}></div>
+                            </div>
                         </div>
                     </div>
-                </div>
                 {!autoScroll && <div style={{ position: "absolute", bottom: "26vh", width: "100vw" }} className="flex justify-center items-center">
                     <Button style={{ backgroundColor: "rgb(28, 28, 28)", border: "1px solid rgba(255, 255, 255, 0.14)" }} isIconOnly
                         onPress={() => {
@@ -420,28 +833,58 @@ export default function Home() {
                         }}
                     ><ArrowDown></ArrowDown></Button>
                 </div>}
-                <div style={{ height: "24vh", "width": "100%", position: "fixed" }} className="flex justify-center items-center">
-                    <div className="flex flex-col" style={{ height: "100%", width: "50%", border: "1px solid rgba(255, 255, 255, 0.14)", borderBottom: "none", borderTopLeftRadius: "14px", borderTopRightRadius: "14px", background: "#1c1c1c" }}>
-                        <div style={{ height: "auto", padding: "8px" }} className="flex-1">
-                            <textarea style={{ height: "90%", width: "97.5%", border: "none", padding: "5px", backgroundColor: "#1c1c1c" }}
-                                onInput={(x) => {
-                                    setInputContent(x.target.value)
-                                }}
-                                value={inputContent}
-                                placeholder="Write your message here"
-                                autoFocus
-                            >
-                            </textarea>
-                        </div>
-                        <div style={{ height: "auto" }}>
-                            <div style={{ float: "right", marginRight: "10px", marginBottom: "10px", cursor: "pointer" }} className="flex justify-center items-center">
-                                <Button variant="faded" size="sm" style={{ marginRight: "10px" }} onPress={() => {
-                                    onOpen()
-                                }}>Open VS Code</Button>
+                    <div style={{ height: "24vh", "width": "100%", position: "fixed" }} className="flex justify-center items-center">
+                        <div className="flex flex-col" style={{ height: "100%", width: "50%", border: "1px solid rgba(255, 255, 255, 0.14)", borderBottom: "none", borderTopLeftRadius: "14px", borderTopRightRadius: "14px", background: "#1c1c1c" }}>
+                            <div style={{ height: "auto", padding: "8px" }} className="flex-1">
+                                <textarea 
+                                    style={{ 
+                                        height: "90%", 
+                                        width: "97.5%", 
+                                        border: "none", 
+                                        padding: "5px", 
+                                        backgroundColor: "#1c1c1c",
+                                        opacity: (isSendingMessage || isResponding || !serverURL) ? 0.6 : 1
+                                    }}
+                                    onInput={(x) => {
+                                        setInputContent(x.target.value)
+                                    }}
+                                    value={inputContent}
+                                    placeholder={isSendingMessage ? "Sending message..." : isResponding ? "Waiting for response..." : !serverURL ? "Connecting to server..." : "Write your message here"}
+                                    autoFocus
+                                    disabled={isSendingMessage || isResponding || !serverURL}
+                                    onKeyDown={(e) => {
+                                        if (e.key === 'Enter' && !e.shiftKey) {
+                                            e.preventDefault();
+                                            if (!isSendingMessage && !isResponding && serverURL) {
+                                                sendMessage();
+                                            }
+                                        }
+                                    }}
+                                >
+                                </textarea>
+                            </div>
+                            <div style={{ height: "auto" }}>
+                                <div style={{ float: "right", marginRight: "10px", marginBottom: "10px", cursor: "pointer" }} className="flex justify-center items-center gap-2">
+                                    {(isSendingMessage || isResponding) && (
+                                        <div className="flex items-center gap-2 text-sm text-gray-400">
+                                            <InlineSpinner size="sm" />
+                                            {isSendingMessage ? "Sending..." : "Waiting..."}
+                                        </div>
+                                    )}
+                                    <Button 
+                                        variant="faded" 
+                                        size="sm" 
+                                        style={{ marginRight: "10px" }} 
+                                        onPress={() => onOpen()}
+                                        disabled={isLoadingServer}
+                                    >
+                                        {isLoadingServer ? <InlineSpinner size="sm" className="mr-2" /> : null}
+                                        Open VS Code
+                                    </Button>
+                                </div>
                             </div>
                         </div>
                     </div>
-                </div>
             </div>
             <div
                 style={{
@@ -523,5 +966,6 @@ export default function Home() {
                 </ModalContent>
             </Modal>
         </ClickSpark>
-    )
+    </ErrorBoundary>
+)
 }
