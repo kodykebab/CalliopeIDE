@@ -17,6 +17,12 @@ from .validators import (
     validate_login_data,
     sanitize_input
 )
+from .secure_execution import (
+    secure_execute,
+    SecurityError,
+    ExecutionTimeoutError,
+    MemoryLimitError
+)
 
 __all__ = [
     'generate_access_token',
@@ -29,5 +35,9 @@ __all__ = [
     'validate_password',
     'validate_registration_data',
     'validate_login_data',
-    'sanitize_input'
+    'sanitize_input',
+    'secure_execute',
+    'SecurityError',
+    'ExecutionTimeoutError',
+    'MemoryLimitError'
 ]

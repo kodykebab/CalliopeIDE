@@ -79,15 +79,56 @@ def send_query():
     return response
 
 def execute_command(cmd: str) -> str:
-    print(f"Agent is executing command ```{cmd.replace("`", "'")}```")
+    """
+    Execute shell commands with basic security restrictions.
+    
+    WARNING: This function executes shell commands and should be used with extreme caution.
+    Consider using secure_execute() for Python code execution instead.
+    """
+    # Log the command execution attempt
+    print(f"Agent is executing command ```{cmd.replace('`', \"'\")}```")
+    
+    # Basic security checks - block obviously dangerous commands
+    dangerous_patterns = [
+        r'\brm\s+-rf\s+/',  # Recursive delete from root
+        r'\bsudo\s+',       # Sudo commands
+        r'\bsu\s+',         # Switch user
+        r'\bchmod\s+777',   # Dangerous permissions
+        r'\bdd\s+if=',      # Disk operations
+        r'\bmkfs\.',        # Format filesystem
+        r'\bfdisk\s+',      # Disk partitioning
+        r'\bcrontab\s+',    # Cron jobs
+        r'\bsystemctl\s+',  # System service control
+        r'>\s*/dev/sd[a-z]', # Writing to disk devices
+        r'\b/etc/passwd',   # Password file access
+        r'\b/etc/shadow',   # Shadow file access
+        r'\bwget\s+.*\|\s*sh',  # Download and execute
+        r'\bcurl\s+.*\|\s*sh',  # Download and execute
+    ]
+    
+    for pattern in dangerous_patterns:
+        if re.search(pattern, cmd, re.IGNORECASE):
+            return f"ERROR: Command blocked for security reasons - dangerous pattern detected: {pattern}"
+    
+    # Limit command length
+    if len(cmd) > 1000:
+        return "ERROR: Command too long (max 1000 characters)"
+    
     try:
-        output = subprocess.run(cmd, shell=True, text=True, 
-                                capture_output=True, timeout=300)
+        # Use more restrictive timeout and environment
+        output = subprocess.run(
+            cmd, 
+            shell=True, 
+            text=True, 
+            capture_output=True, 
+            timeout=30,  # Reduced from 300s to 30s
+            env={'PATH': os.environ.get('PATH', ''), 'HOME': '/tmp'}  # Minimal environment
+        )
         if output.returncode != 0 and output.stderr:
             return f"ERROR: {output.stderr}\nOUTPUT: {output.stdout}"
         return output.stdout
     except subprocess.TimeoutExpired:
-        return "COMMAND TIMED OUT (300s limit)"
+        return "COMMAND TIMED OUT (30s limit)"
     except Exception as e:
         return f"ERROR: {str(e)}"
 
