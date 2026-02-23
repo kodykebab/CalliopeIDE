@@ -8,6 +8,10 @@ import { fontSans, fontMono } from "@/config/fonts";
 import "@/styles/globals.css";
 import ErrorBoundary, { AsyncErrorBoundary } from "@/components/ErrorBoundary";
 import { ToastContainer } from "@/components/ErrorAlert";
+import { SentryConfig, captureExceptionWithContext } from "@/config/sentry";
+
+// Initialize Sentry
+SentryConfig.initSentry();
 
 export default function App({ Component, pageProps }: AppProps) {
   const router = useRouter();
@@ -15,11 +19,12 @@ export default function App({ Component, pageProps }: AppProps) {
   const handleGlobalError = (error: Error, errorInfo?: any) => {
     console.error('Global error caught:', error, errorInfo);
     
-    // In production, you might want to send this to an error reporting service
-    if (process.env.NODE_ENV === 'production') {
-      // Example: Send to error reporting service
-      // errorReportingService.captureException(error, { extra: errorInfo });
-    }
+    // Capture with Sentry if enabled
+    captureExceptionWithContext(error, {
+      errorInfo,
+      component: 'App',
+      route: router.pathname
+    });
   };
 
   return (

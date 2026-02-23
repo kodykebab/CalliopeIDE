@@ -24,6 +24,7 @@
     "@radix-ui/react-slot": "^1.2.0",
     "@react-aria/visually-hidden": "3.8.21",
     "@react-spring/web": "^9.7.5",
+    "@sentry/nextjs": "^8.40.0",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
     "framer-motion": "11.13.1",

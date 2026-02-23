@@ -1,4 +1,5 @@
 import { useState } from 'react';
+import { captureExceptionWithContext } from '@/config/sentry';
 
 /**
  * Centralized API client with error handling, loading states, and standardized responses
@@ -109,14 +110,27 @@ class ApiClient {
    */
   private async handleErrorResponse(response: Response): Promise<ApiResponse> {
     let errorMessage = 'An unexpected error occurred';
+    let errorData: any = null;
 
     try {
-      const errorData = await response.json();
+      errorData = await response.json();
       errorMessage = errorData.message || errorData.error || errorMessage;
     } catch {
       // If we can't parse the error response, use status-based messages
       errorMessage = this.getStatusErrorMessage(response.status);
     }
+
+    // Capture API error with Sentry
+    captureExceptionWithContext(new Error(`API Error: ${response.status} ${response.statusText}`), {
+      apiResponse: {
+        status: response.status,
+        statusText: response.statusText,
+        url: response.url,
+        errorMessage,
+        errorData
+      },
+      component: 'ApiClient'
+    });
 
     return {
       success: false,
@@ -129,23 +143,26 @@ class ApiClient {
    * Handle request-level errors (network, timeout, etc.)
    */
   private handleRequestError(error: any): ApiResponse {
+    let errorMessage = 'Unable to connect to the server. Please try again.';
+    
     if (error.name === 'AbortError') {
-      return {
-        success: false,
-        error: 'Request timed out. Please try again.'
-      };
+      errorMessage = 'Request timed out. Please try again.';
+    } else if (!navigator.onLine) {
+      errorMessage = 'No internet connection. Please check your network.';
     }
 
-    if (!navigator.onLine) {
-      return {
-        success: false,
-        error: 'No internet connection. Please check your network.'
-      };
+    // Capture network error with Sentry (skip timeout and offline errors in most cases)
+    if (error.name !== 'AbortError' && navigator.onLine) {
+      captureExceptionWithContext(error, {
+        errorType: 'network_error',
+        online: navigator.onLine,
+        component: 'ApiClient'
+      });
     }
 
     return {
       success: false,
-      error: 'Unable to connect to the server. Please try again.'
+      error: errorMessage
     };
   }
 

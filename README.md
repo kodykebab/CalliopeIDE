@@ -28,6 +28,7 @@ Calliope IDE addresses these challenges by providing:
 - 📱 Responsive design for coding on any device
 - 🔒 Secure authentication and code storage
 - 🎨 Modern UI with HeroUI components
+- 📊 **Sentry Monitoring**: Comprehensive error tracking and monitoring (optional)
 - ⚡ Fast performance with Next.js
 - 🔍 Advanced code search and analysis
 - 📊 Contract analytics and insights

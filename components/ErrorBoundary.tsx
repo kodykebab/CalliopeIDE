@@ -2,6 +2,7 @@ import React, { Component, ErrorInfo, ReactNode } from 'react';
 import { AlertCircle, RefreshCw, Home } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { handleApiError } from '@/utils/errorHandler';
+import { captureExceptionWithContext } from '@/config/sentry';
 
 interface Props {
   children: ReactNode;
@@ -62,10 +63,15 @@ export class ErrorBoundary extends Component<Props, State> {
     console.error('Error:', errorReport);
     console.groupEnd();
 
-    // In production, you might want to send this to an error reporting service
-    if (process.env.NODE_ENV === 'production') {
-      // Example: Send to error reporting service
-      // errorReportingService.captureException(error, errorReport);
+    // Capture error with Sentry
+    const eventId = captureExceptionWithContext(error, {
+      errorInfo,
+      component: 'ErrorBoundary',
+      errorReport
+    });
+
+    if (eventId) {
+      console.log(`Error reported to Sentry with ID: ${eventId}`);
     }
   };
 
