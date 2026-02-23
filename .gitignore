@@ -1,4 +1,4 @@
-# Python
+ # Python
 __pycache__/
 *.py[cod]
 *$py.class
@@ -27,3 +27,4 @@ data/
 
 # Instance folders
 instance*/
+node_modules
