@@ -37,10 +37,12 @@ console.error = (...args) => {
   originalConsoleError(...args);
 };
 
-window.addEventListener('unhandledrejection', (event) => {
-  unhandledPromises.push(event.reason);
-  console.log('🚨 Unhandled Promise Rejection:', event.reason);
-});
+if (typeof window !== 'undefined') {
+  window.addEventListener('unhandledrejection', (event) => {
+    unhandledPromises.push(event.reason);
+    console.log('🚨 Unhandled Promise Rejection:', event.reason);
+  });
+}
 
 /**
  * TEST 1: Backend Stop → Send Chat → Clear Error + Retry Option
