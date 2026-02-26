@@ -1,3 +1,23 @@
+# Dependencies
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Next.js
+.next/
+out/
+
+# Production builds
+build/
+dist/
+
+# Environment
+.env
+.env.local
+.env.production.local
+.env.development.local
+
 # Python
 __pycache__/
 *.py[cod]
@@ -12,15 +32,15 @@ env/
 *.sqlite3
 data/
 
-# Environment
-.env
-.env.local
-
 # IDE
 .vscode/
 .idea/
 *.swp
 *.swo
+
+# OS
+.DS_Store
+Thumbs.db
 
 # Backups
 *.backup

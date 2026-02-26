@@ -10,6 +10,11 @@ import ClickSpark from "../../scripts/clickspark"
 import { useRouter } from "next/router";
 import 'katex/dist/katex.min.css'
 
+// Import our new error handling components
+import { ErrorBoundary } from '../../components/error-boundary';
+import { ToastContainer, showErrorToast, showSuccessToast, showWarningToast } from '../../components/ui/error-alert';
+import { LoadingSpinner, ButtonWithLoading } from '../../components/ui/loading-spinner';
+import { safeFetch, handleApiError, logError } from '../../lib/error-handler';
 
 const MarkdownComponent = (content) => {
     return (
@@ -46,7 +51,7 @@ const UserMessage = (content, i, setInputContent, currentChat, setCurrentChat, s
 
 const ModelMessage = MarkdownComponent
 
-export default function Home() {
+function AppContent() {
     var host = "http://127.0.0.1"
     const router = useRouter();
     const [inputContent, setInputContent] = useState("")
@@ -56,21 +61,36 @@ export default function Home() {
     var [chatId, setChatId] = useState(null)
     const { isOpen, onOpen, onOpenChange } = useDisclosure()
     const { isOpen: ChatHistoryModalIsOpen, onOpen: ChatHistoryModalOnOpen, onOpenChange: ChatHistoryModalOnOpenChange, onClose: ChatHistoryModalOnClose } = useDisclosure()
-    var KeyStateDefault = ""
-    try {
-        KeyStateDefault = eval("localStorage")?.getItem("geminiAPIKey")
-    } catch { }
-    const [modalAPIKeyValue, setModalAPIKeyValue] = useState(KeyStateDefault)
+    
+    // API Key management with error handling
+    const [modalAPIKeyValue, setModalAPIKeyValue] = useState("")
     const [isResponding, setIsResponding] = useState(false)
     const [currentStream, setCurrentStream] = useState(null)
-    var proDefault = false
-    try {
-        proDefault = eval("localStorage")?.getItem("usingPro") == "true"
-    } catch { }
-    const [usingPro, setIsUsingPro] = useState(proDefault)
+    const [usingPro, setIsUsingPro] = useState(false)
+
+    // Loading states
+    const [isLoadingServer, setIsLoadingServer] = useState(true)
+    const [isLoadingChat, setIsLoadingChat] = useState(false)
+    const [isSubmittingMessage, setIsSubmittingMessage] = useState(false)
 
     const chatboxRef = useRef(null);
     const [autoScroll, setAutoScroll] = useState(true);
+
+    // Initialize localStorage values with error handling
+    useEffect(() => {
+        try {
+            const savedApiKey = localStorage?.getItem("geminiAPIKey");
+            if (savedApiKey) {
+                setModalAPIKeyValue(savedApiKey);
+            }
+            
+            const savedProSetting = localStorage?.getItem("usingPro") === "true";
+            setIsUsingPro(savedProSetting);
+        } catch (error) {
+            logError(error, 'localStorage initialization');
+            showWarningToast("Unable to load saved settings");
+        }
+    }, []);
 
     useEffect(() => {
         const el = chatboxRef.current;
@@ -81,30 +101,73 @@ export default function Home() {
 
     useEffect(() => {
         setTimeout(() => {
-            document.querySelector("textarea").focus()
+            try {
+                document.querySelector("textarea")?.focus();
+            } catch (error) {
+                console.warn("Could not focus textarea:", error);
+            }
         }, 10)
     }, [])
 
+    // Load chat from URL with error handling
     useEffect(() => {
-        const id = router.query.id
+        const id = router.query.id;
         if (id) {
-            var storageChat = window.localStorage.getItem(id)
-            if (storageChat) {
-                setChatId(id)
-                setCurrentChat(JSON.parse(storageChat))
-                const el = document.getElementById("chatbox");
-                const here = el.scrollTop;
-                el.scrollTo({ top: here, behavior: "instant" });
+            try {
+                setIsLoadingChat(true);
+                const storageChat = window.localStorage.getItem(id);
+                if (storageChat) {
+                    const parsedChat = JSON.parse(storageChat);
+                    setChatId(id);
+                    setCurrentChat(parsedChat);
+                    
+                    setTimeout(() => {
+                        const el = document.getElementById("chatbox");
+                        if (el) {
+                            const here = el.scrollTop;
+                            el.scrollTo({ top: here, behavior: "instant" });
+                        }
+                    }, 100);
+                } else {
+                    showWarningToast("Chat not found", "The requested chat could not be loaded");
+                }
+            } catch (error) {
+                logError(error, 'chat loading');
+                showErrorToast(handleApiError(error), "Failed to load chat");
+            } finally {
+                setIsLoadingChat(false);
             }
         }
     }, [router.query.id])
 
+    // Initialize server connection with error handling
     useEffect(() => {
-        (async () => {
-            var data = await (await fetch(host + ":5000/")).json()
-            setServerURL(host + ":" + data.port)
-            setCodeServerURL(host + ":" + "8080/?folder=" + data.location)
-        })()
+        async function initializeServer() {
+            try {
+                setIsLoadingServer(true);
+                const result = await safeFetch(host + ":5000/", {}, 8000);
+                
+                if (result.success && result.data) {
+                    setServerURL(host + ":" + result.data.port);
+                    setCodeServerURL(host + ":" + "8080/?folder=" + result.data.location);
+                    showSuccessToast("Server connected successfully");
+                } else {
+                    throw result.error || new Error("Failed to get server info");
+                }
+            } catch (error) {
+                logError(error, 'server initialization');
+                const apiError = handleApiError(error);
+                showErrorToast(apiError, "Server Connection Failed");
+                
+                // Set fallback URLs
+                setServerURL(host + ":8000");
+                setCodeServerURL(host + ":8080");
+            } finally {
+                setIsLoadingServer(false);
+            }
+        }
+
+        initializeServer();
     }, [])
 
     function generateUnsafeUUID() {
@@ -138,7 +201,11 @@ export default function Home() {
         }
 
         if (event.key == "Enter") {
-            try { event.preventDefault() } catch { }
+            try { 
+                event.preventDefault() 
+            } catch (error) {
+                console.warn("Could not prevent default:", error);
+            }
 
             if (ChatHistoryQueryResults.length == 0) {
                 return;
@@ -148,19 +215,142 @@ export default function Home() {
             setChatHistoryInputText("")
 
             if (ChatHistoryQueryResults[selectedItem].date == "Command") {
-                commands[ChatHistoryQueryResults[selectedItem].title]()
+                try {
+                    commands[ChatHistoryQueryResults[selectedItem].title]()
+                } catch (error) {
+                    logError(error, 'command execution');
+                    showErrorToast(handleApiError(error), "Failed to execute command");
+                }
                 return
             }
 
-            localStorage.setItem("readerId", "")
-            setChatId(ChatHistoryQueryResults[selectedItem].id)
-            ChatHistoryModalOnClose()
-            setIsResponding(false)
-            router.push("/?id=" + ChatHistoryQueryResults[selectedItem].id)
+            try {
+                localStorage.setItem("readerId", "")
+                setChatId(ChatHistoryQueryResults[selectedItem].id)
+                ChatHistoryModalOnClose()
+                setIsResponding(false)
+                router.push("/?id=" + ChatHistoryQueryResults[selectedItem].id)
+            } catch (error) {
+                logError(error, 'chat history selection');
+                showErrorToast(handleApiError(error), "Failed to load selected chat");
+            }
         }
 
         if (event.key == "Tab") {
             ChatHistoryModalOnClose()
+        }
+    }
+
+    // Enhanced message sending with proper error handling
+    async function sendMessage() {
+        if (!inputContent.trim()) {
+            return;
+        }
+
+        if (isSubmittingMessage || isResponding) {
+            showWarningToast("Please wait for the current message to complete");
+            return;
+        }
+
+        if (!serverURL) {
+            showErrorToast({ message: "Server not connected. Please wait or refresh the page." });
+            return;
+        }
+
+        try {
+            setIsSubmittingMessage(true);
+            const currentChatId = HandleChat();
+
+            // Update chat with user message and empty model response
+            const newChat = [
+                ...currentChat, 
+                { role: "user", parts: [{ text: inputContent }] }, 
+                { role: "model", parts: [{ text: "" }] }
+            ];
+
+            setCurrentChat(newChat);
+            
+            // Save to localStorage with error handling
+            try {
+                window.localStorage.setItem(currentChatId, JSON.stringify(newChat));
+                window.localStorage.setItem(currentChatId + "date", parseInt(Number(new Date()) / 1000).toString());
+            } catch (storageError) {
+                logError(storageError, 'localStorage save');
+                showWarningToast("Could not save chat locally");
+            }
+
+            setIsResponding(true);
+            setAutoScroll(true);
+            const messageToSend = inputContent;
+            setInputContent(""); // Clear input immediately
+
+            // Stream response with error handling
+            await streamGeminiResponse(
+                serverURL, 
+                [...currentChat, { role: "user", parts: [{ text: messageToSend }] }], 
+                // onUpdate callback
+                (responseText, id) => {
+                    try {
+                        const parsedResponse = JSON.parse(responseText);
+                        if (parsedResponse.type !== "output") return;
+                        
+                        const textToAdd = parsedResponse.data + "\n\n";
+                        
+                        setCurrentChat((prevChat) => {
+                            if (window.localStorage.getItem("readerId") !== id) {
+                                return prevChat;
+                            }
+                            
+                            const updatedChat = [...prevChat];
+                            const lastMessage = { ...updatedChat[updatedChat.length - 1] };
+                            const lastPart = { ...lastMessage.parts[0] };
+
+                            lastPart.text += textToAdd;
+                            lastMessage.parts = [lastPart];
+                            updatedChat[updatedChat.length - 1] = lastMessage;
+
+                            // Save updated chat
+                            try {
+                                window.localStorage.setItem(currentChatId, JSON.stringify(updatedChat));
+                                window.localStorage.setItem(currentChatId + "date", parseInt(Number(new Date()) / 1000).toString());
+                            } catch (storageError) {
+                                console.warn("Could not save chat update:", storageError);
+                            }
+
+                            return updatedChat;
+                        });
+                    } catch (parseError) {
+                        console.warn("Could not parse stream response:", parseError, responseText);
+                    }
+                },
+                // onEnd callback
+                () => {
+                    setIsResponding(false);
+                    setIsSubmittingMessage(false);
+                },
+                // onError callback
+                (error) => {
+                    logError(error, 'message streaming');
+                    showErrorToast(error, "Failed to get response");
+                    setIsResponding(false);
+                    setIsSubmittingMessage(false);
+                    
+                    // Clean up the empty model response on error
+                    setCurrentChat(prev => {
+                        const updated = [...prev];
+                        if (updated.length > 0 && updated[updated.length - 1].role === "model" && !updated[updated.length - 1].parts[0].text) {
+                            updated.pop();
+                        }
+                        return updated;
+                    });
+                }
+            );
+
+        } catch (error) {
+            logError(error, 'send message');
+            showErrorToast(handleApiError(error), "Failed to send message");
+            setIsResponding(false);
+            setIsSubmittingMessage(false);
         }
     }
 
@@ -171,54 +361,12 @@ export default function Home() {
         }
 
         if (event.key === "Enter" && !event.shiftKey) {
-            if (inputContent == "") {
+            event.preventDefault();
+            if (inputContent.trim() === "") {
                 onOpen()
                 return
             }
-
-            chatId = HandleChat()
-
-            setCurrentChat((currentChat) => {
-                var newChat = [...currentChat, { role: "user", parts: [{ text: inputContent }] }, { role: "model", parts: [{ text: "" }] }]
-                window.localStorage.setItem(chatId, JSON.stringify(newChat))
-                window.localStorage.setItem(chatId + "date", parseInt(Number(new Date()) / 1000).toString())
-                return newChat
-            })
-
-            setIsResponding(true)
-
-            setTimeout(() => {
-                setAutoScroll(true)
-            }, 10)
-
-            setInputContent("")
-
-            streamGeminiResponse(serverURL, [...currentChat, { role: "user", parts: [{ text: inputContent }] }], (x, id) => {
-                x = JSON.parse(x)
-                if (x.type != "output") return;
-                x = x.data + "\n\n"
-                setCurrentChat((prevChat) => {
-                    if (window.localStorage.getItem("readerId") != id) {
-                        return prevChat
-                    }
-                    const updatedChat = [...prevChat];
-                    const lastMessage = { ...updatedChat[updatedChat.length - 1] };
-                    const lastPart = { ...lastMessage.parts[0] };
-
-                    lastPart.text += x;
-                    lastMessage.parts = [lastPart];
-                    updatedChat[updatedChat.length - 1] = lastMessage;
-
-                    window.localStorage.setItem(chatId, JSON.stringify(updatedChat))
-
-                    window.localStorage.setItem(chatId + "date", parseInt(Number(new Date()) / 1000).toString())
-
-                    return updatedChat;
-                });
-            }, () => {
-                setIsResponding(false)
-            })
-            try { event.preventDefault() } catch { }
+            sendMessage();
         }
 
         if (event.code == "Tab") {
@@ -227,31 +375,33 @@ export default function Home() {
         }
 
         if (event.code == "Escape") {
-            localStorage.setItem("readerId", "")
-            setIsResponding(false)
+            try {
+                localStorage.setItem("readerId", "")
+                setIsResponding(false)
+            } catch (error) {
+                console.warn("Could not clear reader ID:", error);
+            }
         }
 
         if (event.key == "/") {
-            if (document.activeElement != document.querySelector("textarea")) {
+            if (document.activeElement !== document.querySelector("textarea")) {
                 event.preventDefault()
-                document.querySelector("textarea").focus()
+                document.querySelector("textarea")?.focus()
             }
         }
     }
 
     var [selectedItem, setSelectedItem] = useState(0)
-
     const [ChatHistoryQueryResults, setChatHistoryQueryResults] = useState([])
 
     useEffect(() => {
-
         document.addEventListener("keydown", KeyboardListener)
-
-        return () => { document.removeEventListener("keydown", KeyboardListener) }
-    }, [inputContent, ChatHistoryModalIsOpen, selectedItem, ChatHistoryQueryResults])
+        return () => { 
+            document.removeEventListener("keydown", KeyboardListener) 
+        }
+    }, [inputContent, ChatHistoryModalIsOpen, selectedItem, ChatHistoryQueryResults, isSubmittingMessage, isResponding])
 
     const prevScrollTop = useRef(0);
-
     const [chatHistoryInputText, setChatHistoryInputText] = useState("")
 
     function getGithubTimeDelta(unixTimestampSec) {
@@ -281,16 +431,20 @@ export default function Home() {
     }
 
     function NewChat() {
-        setCurrentChat([])
-        setChatId(null)
-        ChatHistoryModalOnClose()
-        localStorage.setItem("readerId", "")
-        setIsResponding(false)
-        router.push("/")
-        setTimeout(() => {
-            document.querySelector("textarea").focus()
-        }, 10)
-        return
+        try {
+            setCurrentChat([])
+            setChatId(null)
+            ChatHistoryModalOnClose()
+            localStorage.setItem("readerId", "")
+            setIsResponding(false)
+            router.push("/")
+            setTimeout(() => {
+                document.querySelector("textarea")?.focus()
+            }, 10)
+        } catch (error) {
+            logError(error, 'new chat creation');
+            showErrorToast(handleApiError(error), "Failed to create new chat");
+        }
     }
 
     var commands = {
@@ -298,59 +452,71 @@ export default function Home() {
             onOpen()
         },
         "New Chat - Deletes the current chat": () => {
-            localStorage.removeItem(chatId + "date")
-            localStorage.removeItem(chatId)
             NewChat()
         }
     }
 
-    function GetResults(query) {
-        try { eval("localStorage") } catch {
-            return
-        }
-        var results = {}
-        for (let index = 0; index < localStorage.length; index++) {
-            const key = localStorage.key(index);
-            if (key.endsWith("date")) {
-                var chat = localStorage.getItem(key.split("date")[0])
-                if (!chat.toLocaleLowerCase().includes(query.toLocaleLowerCase().trim())) {
-                    continue
-                }
-                chat = JSON.parse(chat)
-                var date = parseInt(localStorage.getItem(key))
-                results[date] = { "date": getGithubTimeDelta(date), "title": chat[0].parts[0].text, "chat": chat, "id": key.split("date")[0] }
-            }
-        }
-
-        var sortedResults = Object.keys(results)
-            .sort((a, b) => b - a)
-            .map(key => results[key]);
-
-        var filteredCommands = []
-
-        var commandsKeys = Object.keys(commands)
-
-        for (let index = 0; index < commandsKeys.length; index++) {
-            const element = commandsKeys[index];
-            if (element.toLocaleLowerCase().includes(query.toLocaleLowerCase())) {
-                filteredCommands.push({ "date": "Command", "title": element, "id": "" })
-            }
-        }
-
-        return [...filteredCommands]
-    }
-
+    // Update the query results based on search
     useEffect(() => {
-        if (ChatHistoryModalIsOpen) {
-            setChatHistoryQueryResults(GetResults(chatHistoryInputText))
-        }
-    }, [ChatHistoryModalIsOpen, chatHistoryInputText])
-    var queryInputCurrentWidth = ""
+        try {
+            var results = []
+            
+            Object.keys(commands).forEach(commandName => {
+                if (commandName.toLowerCase().includes(chatHistoryInputText.toLowerCase()) && chatHistoryInputText !== "") {
+                    results.push({
+                        title: commandName,
+                        date: "Command",
+                        id: null
+                    })
+                }
+            })
 
+            // Get chat history from localStorage
+            const keys = Object.keys(localStorage).filter(key => 
+                key !== "geminiAPIKey" && 
+                key !== "usingPro" && 
+                key !== "readerId" && 
+                !key.includes("date")
+            );
+
+            keys.forEach(key => {
+                try {
+                    const chatData = JSON.parse(localStorage.getItem(key));
+                    if (chatData && Array.isArray(chatData) && chatData.length > 0) {
+                        const firstUserMessage = chatData.find(msg => msg.role === "user");
+                        if (firstUserMessage && 
+                            firstUserMessage.parts[0].text.toLowerCase().includes(chatHistoryInputText.toLowerCase()) && 
+                            chatHistoryInputText !== "") {
+                            
+                            const dateKey = key + "date";
+                            const timestamp = localStorage.getItem(dateKey);
+                            
+                            results.push({
+                                title: firstUserMessage.parts[0].text,
+                                date: timestamp ? getGithubTimeDelta(parseInt(timestamp)) : "Unknown",
+                                id: key
+                            });
+                        }
+                    }
+                } catch (parseError) {
+                    console.warn(`Could not parse chat data for key ${key}:`, parseError);
+                }
+            });
+
+            setChatHistoryQueryResults(results);
+        } catch (error) {
+            logError(error, 'chat history search');
+            setChatHistoryQueryResults([]);
+        }
+    }, [chatHistoryInputText]);
+
+    var queryInputCurrentWidth = "60vw"
     if (ChatHistoryModalIsOpen) {
         try {
-            queryInputCurrentWidth = document.getElementById("queryInput").clientWidth + "px"
-        } catch { }
+            queryInputCurrentWidth = document.getElementById("queryInput")?.clientWidth + "px" || "60vw";
+        } catch (error) {
+            console.warn("Could not get query input width:", error);
+        }
     }
 
     useEffect(() => {
@@ -359,18 +525,37 @@ export default function Home() {
 
     const [mountedIframe] = useState(() => {
         try {
-            eval("document")
-        } catch { return "" }
-        const el = eval("document").createElement("iframe");
-        el.src = codeServerURL;
-        el.style.width = "100%";
-        el.style.height = "100%";
-        return el;
+            if (typeof document === "undefined") return "";
+            
+            const el = document.createElement("iframe");
+            el.src = codeServerURL;
+            el.style.width = "100%";
+            el.style.height = "100%";
+            return el;
+        } catch (error) {
+            logError(error, 'iframe creation');
+            return "";
+        }
     });
 
     useEffect(() => {
-        mountedIframe.src = codeServerURL;
-    }, [codeServerURL]);
+        if (mountedIframe && codeServerURL) {
+            mountedIframe.src = codeServerURL;
+        }
+    }, [codeServerURL, mountedIframe]);
+
+    // Show loading screen while server initializes
+    if (isLoadingServer) {
+        return (
+            <div className="min-h-screen bg-[#111] flex items-center justify-center">
+                <LoadingSpinner 
+                    size="lg" 
+                    label="Connecting to Calliope server..." 
+                    className="text-white"
+                />
+            </div>
+        );
+    }
 
     return (
         <ClickSpark>
@@ -388,61 +573,94 @@ export default function Home() {
                 <div style={{ height: "76vh", "width": "100%" }}>
                     <div style={{ height: "100%", width: "100%" }} className="flex justify-center items-center">
                         <div style={{ height: "100%", width: "60%", marginTop: "50px" }}>
-                            {chatId == null ? <>
+                            {isLoadingChat ? (
+                                <div className="flex justify-center items-center h-64">
+                                    <LoadingSpinner label="Loading chat..." />
+                                </div>
+                            ) : chatId == null ? (
                                 <div style={{ height: "100%", width: "100%" }} className="flex justify-center items-center">
                                     <div>
                                         <h1 className="text-4xl mt-10 text-center">What's on your mind today?</h1>
                                         <div className="flex justify-center items-center text-center" style={{ color: "#A1A1AA", marginTop: "14px" }}>
-                                            Press the Tab Key to open the Command Pallette
+                                            Press the Tab Key to open the Command Palette
                                         </div>
                                     </div>
                                 </div>
-                            </> : ""}
-                            {currentChat.map((item, i) => {
-                                if (item.role == "user") {
-                                    return UserMessage(item.parts[0].text, Number(i), setInputContent, currentChat, setCurrentChat, setIsResponding)
-                                } else {
-                                    return ModelMessage(item.parts[0].text)
-                                }
-                            })}
-                            {isResponding && <p className="shiny-text">Calliope is working for you!</p>}
+                            ) : (
+                                currentChat.map((item, i) => {
+                                    if (item.role == "user") {
+                                        return UserMessage(item.parts[0].text, Number(i), setInputContent, currentChat, setCurrentChat, setIsResponding)
+                                    } else {
+                                        return ModelMessage(item.parts[0].text)
+                                    }
+                                })
+                            )}
+                            
+                            {isResponding && (
+                                <div className="flex items-center gap-2 mb-4">
+                                    <LoadingSpinner size="sm" />
+                                    <p className="shiny-text">Calliope is working for you!</p>
+                                </div>
+                            )}
                             <div style={{ height: "28vh" }}></div>
                         </div>
                     </div>
                 </div>
-                {!autoScroll && <div style={{ position: "absolute", bottom: "26vh", width: "100vw" }} className="flex justify-center items-center">
-                    <Button style={{ backgroundColor: "rgb(28, 28, 28)", border: "1px solid rgba(255, 255, 255, 0.14)" }} isIconOnly
-                        onPress={() => {
-                            const el = chatboxRef.current;
-                            const here = el.scrollTop;
-                            el.scrollTo({ top: here, behavior: "instant" });
-                            setAutoScroll(true)
-                        }}
-                    ><ArrowDown></ArrowDown></Button>
-                </div>}
+                
+                {!autoScroll && (
+                    <div style={{ position: "absolute", bottom: "26vh", width: "100vw" }} className="flex justify-center items-center">
+                        <Button style={{ backgroundColor: "rgb(28, 28, 28)", border: "1px solid rgba(255, 255, 255, 0.14)" }} isIconOnly
+                            onPress={() => {
+                                const el = chatboxRef.current;
+                                if (el) {
+                                    const here = el.scrollTop;
+                                    el.scrollTo({ top: here, behavior: "instant" });
+                                    setAutoScroll(true)
+                                }
+                            }}
+                        >
+                            <ArrowDown />
+                        </Button>
+                    </div>
+                )}
+                
                 <div style={{ height: "24vh", "width": "100%", position: "fixed" }} className="flex justify-center items-center">
                     <div className="flex flex-col" style={{ height: "100%", width: "50%", border: "1px solid rgba(255, 255, 255, 0.14)", borderBottom: "none", borderTopLeftRadius: "14px", borderTopRightRadius: "14px", background: "#1c1c1c" }}>
                         <div style={{ height: "auto", padding: "8px" }} className="flex-1">
-                            <textarea style={{ height: "90%", width: "97.5%", border: "none", padding: "5px", backgroundColor: "#1c1c1c" }}
+                            <textarea 
+                                style={{ height: "90%", width: "97.5%", border: "none", padding: "5px", backgroundColor: "#1c1c1c" }}
                                 onInput={(x) => {
                                     setInputContent(x.target.value)
                                 }}
                                 value={inputContent}
-                                placeholder="Write your message here"
+                                placeholder={isResponding ? "Waiting for response..." : "Write your message here"}
                                 autoFocus
-                            >
-                            </textarea>
+                                disabled={isSubmittingMessage || isResponding}
+                            />
                         </div>
                         <div style={{ height: "auto" }}>
-                            <div style={{ float: "right", marginRight: "10px", marginBottom: "10px", cursor: "pointer" }} className="flex justify-center items-center">
-                                <Button variant="faded" size="sm" style={{ marginRight: "10px" }} onPress={() => {
+                            <div style={{ float: "right", marginRight: "10px", marginBottom: "10px", cursor: "pointer" }} className="flex justify-center items-center gap-2">
+                                <ButtonWithLoading
+                                    isLoading={isSubmittingMessage}
+                                    loadingText="Sending..."
+                                    onClick={sendMessage}
+                                    disabled={!inputContent.trim() || isResponding}
+                                    className="h-8 px-3 text-sm bg-[#9FEF00] text-black hover:bg-[#9FEF00]/80"
+                                >
+                                    Send
+                                </ButtonWithLoading>
+                                <Button variant="faded" size="sm" onPress={() => {
                                     onOpen()
-                                }}>Open VS Code</Button>
+                                }}>
+                                    Open VS Code
+                                </Button>
                             </div>
                         </div>
                     </div>
                 </div>
             </div>
+            
+            {/* VS Code Modal */}
             <div
                 style={{
                     display: isOpen ? "block" : "none",
@@ -472,56 +690,95 @@ export default function Home() {
                 }}
             >
                 <div style={{ width: "100%", height: "100%" }} ref={node => {
-                    if (node && !node.contains(mountedIframe)) {
+                    if (node && mountedIframe && !node.contains(mountedIframe)) {
                         node.appendChild(mountedIframe);
                     }
                 }} />
             </div>
+            
+            {/* Chat History Modal */}
             <Modal isOpen={ChatHistoryModalIsOpen} placement="top" onOpenChange={ChatHistoryModalOnOpenChange} backdrop="blur" hideCloseButton>
                 <ModalContent style={{ padding: "10px", maxWidth: "100vw", width: "fit-content" }}>
-                    {
-                        (onClose) => (
-                            <>
-                                <textarea id="queryInput" style={{ padding: "14px", width: "60vw", fontSize: "20px", borderTopRightRadius: "10px", borderTopLeftRadius: "10px", borderBottomLeftRadius: ChatHistoryQueryResults.length == 0 ? "10px" : null, borderBottomRightRadius: ChatHistoryQueryResults.length == 0 ? "10px" : null }} rows={1} autoFocus
-                                    value={chatHistoryInputText}
-                                    placeholder="Write your query here"
-                                    onInput={(e) => {
-                                        setChatHistoryInputText(e.target.value)
+                    {(onClose) => (
+                        <>
+                            <textarea 
+                                id="queryInput" 
+                                style={{ 
+                                    padding: "14px", 
+                                    width: "60vw", 
+                                    fontSize: "20px", 
+                                    borderTopRightRadius: "10px", 
+                                    borderTopLeftRadius: "10px", 
+                                    borderBottomLeftRadius: ChatHistoryQueryResults.length == 0 ? "10px" : null, 
+                                    borderBottomRightRadius: ChatHistoryQueryResults.length == 0 ? "10px" : null 
+                                }} 
+                                rows={1} 
+                                autoFocus
+                                value={chatHistoryInputText}
+                                placeholder="Write your query here"
+                                onInput={(e) => {
+                                    setChatHistoryInputText(e.target.value)
+                                }}
+                            />
+                            {ChatHistoryQueryResults.map((x, i) => (
+                                <div 
+                                    key={`selection_${i}`}
+                                    id={`selection_${i}`} 
+                                    style={{ 
+                                        width: queryInputCurrentWidth, 
+                                        backgroundColor: selectedItem == i ? "#222" : "#111", 
+                                        padding: "8px", 
+                                        borderBottomRightRadius: i == ChatHistoryQueryResults.length - 1 ? "10px" : "", 
+                                        borderBottomLeftRadius: i == ChatHistoryQueryResults.length - 1 ? "10px" : "", 
+                                        cursor: "pointer" 
                                     }}
-                                ></textarea>
-                                {ChatHistoryQueryResults.map((x, i) =>
-                                    <>
-                                        <div id={"selection_" + i} style={{ width: queryInputCurrentWidth, backgroundColor: selectedItem == i ? "#222" : "#111", padding: "8px", borderBottomRightRadius: i == ChatHistoryQueryResults.length - 1 ? "10px" : "", borderBottomLeftRadius: i == ChatHistoryQueryResults.length - 1 ? "10px" : "", cursor: "pointer" }}
-                                            onClick={(event) => {
-                                                if (event.target.id == "") {
-                                                    event.target = event.target.parentElement
-                                                }
-                                                selectedItem = Number(event.target.id.split("selection_")[1])
-                                                ChatHistoryKeyboardHandler({ "key": "Enter" })
-                                            }}
-                                            onMouseEnter={(e) => {
-                                                if (e.target.id == "") {
-                                                    e.target = e.target.parentElement
-                                                }
-                                                e.target.style.backgroundColor = "#222"
-                                            }}
-                                            onMouseLeave={(e) => {
-                                                if (e.target.id == "") {
-                                                    e.target = e.target.parentElement
-                                                }
-                                                e.target.style.backgroundColor = selectedItem == i ? "#222" : "#111"
-                                            }}
-                                        >
-                                            <h1 style={{ overflow: "hidden", "whiteSpace": "nowrap", "textOverflow": "ellipsis", display: "block" }}>{x.title.replace(/\n/g, ' ')}</h1>
-                                            <h2>{x.date}</h2>
-                                        </div>
-                                    </>
-                                )}
-                            </>
-                        )
-                    }
+                                    onClick={(event) => {
+                                        try {
+                                            let target = event.target;
+                                            if (target.id === "") {
+                                                target = target.parentElement;
+                                            }
+                                            const itemIndex = Number(target.id.split("selection_")[1]);
+                                            setSelectedItem(itemIndex);
+                                            ChatHistoryKeyboardHandler({ "key": "Enter" });
+                                        } catch (error) {
+                                            logError(error, 'chat history item click');
+                                        }
+                                    }}
+                                    onMouseEnter={(e) => {
+                                        let target = e.target;
+                                        if (target.id === "") {
+                                            target = target.parentElement;
+                                        }
+                                        target.style.backgroundColor = "#222";
+                                    }}
+                                    onMouseLeave={(e) => {
+                                        let target = e.target;
+                                        if (target.id === "") {
+                                            target = target.parentElement;
+                                        }
+                                        target.style.backgroundColor = selectedItem == i ? "#222" : "#111";
+                                    }}
+                                >
+                                    <h1 style={{ overflow: "hidden", "whiteSpace": "nowrap", "textOverflow": "ellipsis", display: "block" }}>
+                                        {x.title.replace(/\n/g, ' ')}
+                                    </h1>
+                                    <h2>{x.date}</h2>
+                                </div>
+                            ))}
+                        </>
+                    )}
                 </ModalContent>
             </Modal>
         </ClickSpark>
+    )
+}
+
+export default function Home() {
+    return (
+        <ErrorBoundary>
+            <AppContent />
+            <ToastContainer />
+        </ErrorBoundary>
     )
 }
