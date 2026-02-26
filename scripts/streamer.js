@@ -58,21 +58,27 @@ export async function streamGeminiResponse(endpoint, message, onUpdate, onEnd, o
         let lastUpdateTime = Date.now();
         const readTimeout = 15000; // 15 seconds between updates
 
-        while (true) {
-            // Check for timeout
-            if (Date.now() - lastUpdateTime > readTimeout) {
-                throw new Error("Stream read timeout - no data received");
-            }
+        async function readWithTimeout(reader, timeoutMs) {
+            return Promise.race([
+                reader.read(),
+                new Promise((_, reject) =>
+                    setTimeout(
+                        () => reject(new Error("Stream read timeout - no data received")),
+                        timeoutMs
+                    )
+                )
+            ]);
+        }
 
+        while (true) {
             try {
-                const { done, value } = await reader.read();
-                
+                const { done, value } = await readWithTimeout(reader, readTimeout);
+
                 if (done) break;
-                
+
                 lastUpdateTime = Date.now();
                 const chunk = decoder.decode(value, { stream: true });
                 const lines = chunk.split('\n\n').filter(line => line.trim().startsWith('data: '));
-            
                 for (const line of lines) {
                     try {
                         const text = String(line.split("data: ")[1]);
