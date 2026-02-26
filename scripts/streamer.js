@@ -21,16 +21,18 @@ export async function streamGeminiResponse(endpoint, message, onUpdate, onEnd, o
             controller.abort();
         }, 30000); // 30 second timeout
 
-        const response = await fetch(endpoint + "/?data=" + encodeURIComponent(messageText), {
-            method: "GET",
-            headers: {
-                "Content-Type": "application/json"
-            },
-            signal: controller.signal
-        });
-
-        clearTimeout(timeoutId);
-
+        let response;
+        try {
+            response = await fetch(endpoint + "/?data=" + encodeURIComponent(messageText), {
+                method: "GET",
+                headers: {
+                    "Content-Type": "application/json"
+                },
+                signal: controller.signal
+            });
+        } finally {
+            clearTimeout(timeoutId);
+        }
         // Check if response is ok
         if (!response.ok) {
             throw new Error(`HTTP ${response.status}: ${response.statusText}`);
