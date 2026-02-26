@@ -80,7 +80,7 @@ export class ErrorBoundary extends Component<Props, State> {
                 Oops! Something went wrong
               </h1>
               <p className="text-white/70 text-sm">
-                We encountered an unexpected error. Don't worry, our team has been notified.
+                We encountered an unexpected error. The issue has been logged.
               </p>
             </div>
 
