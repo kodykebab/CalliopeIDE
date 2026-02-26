@@ -45,15 +45,6 @@ export async function streamGeminiResponse(endpoint, message, onUpdate, onEnd, o
         reader = response.body.getReader();
         const decoder = new TextDecoder('utf-8');
 
-        function splitByNewlineAndEveryN(str) {
-            return str
-                .split(/(\n)/)
-                .flatMap(part => {
-                    if (part === '\n') return [part];
-                    return part.match(/.{1,50}/g) || [''];
-                });
-        }
-
         // Add reading timeout
         let lastUpdateTime = Date.now();
         const readTimeout = 15000; // 15 seconds between updates
