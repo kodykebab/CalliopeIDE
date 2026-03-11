@@ -426,7 +426,7 @@ export default function Home() {
                                             style={{ color: "#A1A1AA", marginTop: "14px" }}
                                             aria-label="Keyboard shortcut: Press Tab to open command palette"
                                         >
-                                            Press the Tab Key to open the Command Pallette
+                                            Press the Tab Key to open the Command Palette
                                         </p>
                                     </div>
                                 </div>
