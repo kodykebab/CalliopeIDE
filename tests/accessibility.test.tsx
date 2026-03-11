@@ -33,8 +33,8 @@ jest.mock('../../scripts/clickspark', () => {
 })
 
 // Import components after mocks
-import Home from '../../pages/app/index'
-import DefaultLayout from '../../layouts/default'
+import Home from '../pages/app/index'
+import DefaultLayout from '../layouts/default'
 
 describe('Accessibility Tests', () => {
   
