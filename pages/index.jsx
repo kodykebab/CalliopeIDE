@@ -87,6 +87,7 @@ export default function Home() {
                         <Link 
                             href="https://github.com/aludyalu/chatterji" 
                             target="_blank" 
+                            rel="noopener noreferrer"
                             aria-label="View source code on GitHub"
                             className="text-white/70 hover:text-[#9FEF00] transition-colors focus:outline-none focus:ring-2 focus:ring-[#9FEF00] focus:ring-offset-2 focus:ring-offset-[#0D1117] rounded-md p-1"
                         >
