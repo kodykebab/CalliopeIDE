@@ -41,31 +41,32 @@ export interface ButtonProps
 }
 
 const Button = React.forwardRef<HTMLButtonElement, ButtonProps>(
-  ({ className, variant, size, asChild = false, ...props }, ref) => {
+  ({ className, variant, size, asChild = false, onKeyDown, onClick, ...props }, ref) => {
     const Comp = asChild ? Slot : "button"
     
     const handleKeyDown = (event: React.KeyboardEvent<HTMLButtonElement>) => {
       // Ensure button works with space bar and enter
-      if (event.key === ' ' || event.key === 'Enter') {
+      if (event.key === " " || event.key === "Enter") {
         event.preventDefault()
         // Trigger onClick if it exists
-        if (props.onClick) {
-          props.onClick(event as any)
+        if (onClick) {
+          onClick(event as any)
         }
       }
       
       // Call original onKeyDown if provided
-      if (props.onKeyDown) {
-        props.onKeyDown(event)
+      if (onKeyDown) {
+        onKeyDown(event)
       }
     }
 
     return (
       <Comp
+        {...props}
         className={cn(buttonVariants({ variant, size, className }))}
         ref={ref}
+        onClick={onClick}
         onKeyDown={handleKeyDown}
-        {...props}
       />
     )
   }
