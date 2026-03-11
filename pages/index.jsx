@@ -69,8 +69,7 @@ export default function Home() {
                                 transition={{ duration: 0.3, delay: 0.1 * i }}
                             >
                                 <Link 
-                                    href={item.href} 
-                                    aria-label={`Navigate to ${item.name} section`}
+                                    href={item.href}
                                     className="text-sm font-medium text-white/70 hover:text-white transition-colors focus:outline-none focus:ring-2 focus:ring-[#9FEF00] focus:ring-offset-2 focus:ring-offset-[#0D1117] rounded-md px-2 py-1"
                                 >
                                     {item.name}
