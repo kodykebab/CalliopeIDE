@@ -35,22 +35,27 @@ export default function Home() {
             <GradientBackground />
 
             <header
+                role="banner"
                 className={cn(
                     "fixed top-0 left-0 right-0 z-50 transition-all duration-300",
                     scrolled ? "bg-[#0D1117]/80 backdrop-blur-md border-b border-white/10" : "bg-transparent",
                 )}
             >
-                <div className="mx-auto w-full flex h-20 items-center justify-between px-4 sm:px-6 lg:px-8">
+                <nav 
+                    role="navigation"
+                    aria-label="Main navigation"
+                    className="mx-auto w-full flex h-20 items-center justify-between px-4 sm:px-6 lg:px-8"
+                >
                     <motion.div
                         initial={{ opacity: 0 }}
                         animate={{ opacity: 1 }}
                         transition={{ duration: 0.5 }}
                         className="flex items-center gap-2 font-medium"
                     >
-                        <img src="logo.svg" alt="Calliope" className="h-[45px]" />
+                        <img src="logo.svg" alt="Calliope IDE - AI-powered development environment" className="h-[45px]" />
                     </motion.div>
 
-                    <nav className="hidden md:flex gap-10">
+                    <div className="hidden md:flex gap-10">
                         {[
                             { name: "Features", href: "#features" },
                             { name: "Documentation", href: "#docs" },
@@ -63,12 +68,16 @@ export default function Home() {
                                 animate={{ opacity: 1, y: 0 }}
                                 transition={{ duration: 0.3, delay: 0.1 * i }}
                             >
-                                <Link href={item.href} className="text-sm font-medium text-white/70 hover:text-white transition-colors">
+                                <Link 
+                                    href={item.href} 
+                                    aria-label={`Navigate to ${item.name} section`}
+                                    className="text-sm font-medium text-white/70 hover:text-white transition-colors focus:outline-none focus:ring-2 focus:ring-[#9FEF00] focus:ring-offset-2 focus:ring-offset-[#0D1117] rounded-md px-2 py-1"
+                                >
                                     {item.name}
                                 </Link>
                             </motion.div>
                         ))}
-                    </nav>
+                    </div>
 
                     <motion.div
                         initial={{ opacity: 0 }}
@@ -76,21 +85,28 @@ export default function Home() {
                         transition={{ duration: 0.5, delay: 0.4 }}
                         className="flex items-center gap-4"
                     >
-                        <Link href="https://github.com/aludyalu/chatterji" target="_blank" className="text-white/70 hover:text-[#9FEF00] transition-colors">
-                            <Github className="size-5" />
-                            <span className="sr-only">GitHub</span>
+                        <Link 
+                            href="https://github.com/aludyalu/chatterji" 
+                            target="_blank" 
+                            aria-label="View source code on GitHub"
+                            className="text-white/70 hover:text-[#9FEF00] transition-colors focus:outline-none focus:ring-2 focus:ring-[#9FEF00] focus:ring-offset-2 focus:ring-offset-[#0D1117] rounded-md p-1"
+                        >
+                            <Github className="size-5" aria-hidden="true" />
                         </Link>
                         <Link href="/app">
-                            <Button className="h-10 px-4 bg-[#9FEF00] text-black hover:bg-[#9FEF00]/80 transition-colors">
+                            <Button 
+                                className="h-10 px-4 bg-[#9FEF00] text-black hover:bg-[#9FEF00]/80 transition-colors focus:outline-none focus:ring-2 focus:ring-[#9FEF00] focus:ring-offset-2 focus:ring-offset-[#0D1117]"
+                                aria-label="Get started with Calliope IDE"
+                            >
                                 Get Started
                             </Button>
                         </Link>
                     </motion.div>
-                </div>
+                </nav>
             </header>
 
-            <main className="flex-1">
-                <section className="relative pt-32 pb-20 md:pt-40 md:pb-32" ref={heroRef}>
+            <main role="main" className="flex-1">
+                <section aria-label="Hero section" className="relative pt-32 pb-20 md:pt-40 md:pb-32" ref={heroRef}>
                     <div className="mx-auto px-8 w-full relative z-10">
                         <div className="max-w-4xl mx-auto text-center space-y-8">
                             <motion.div

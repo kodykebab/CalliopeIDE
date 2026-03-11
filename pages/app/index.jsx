@@ -29,14 +29,18 @@ const UserMessage = (content, i, setInputContent, currentChat, setCurrentChat, s
     return (
         <>
             <div style={{ display: "flex", justifyContent: "flex-end" }}>
-                <div style={{
-                    width: "fit-content",
-                    border: "1px solid rgba(255, 255, 255, 0.14)",
-                    padding: "8px",
-                    borderRadius: "5px",
-                    backgroundColor: "#1c1c1c",
-                    marginBottom: "14px"
-                }}>
+                <div 
+                    role="article"
+                    aria-label={`User message: ${content}`}
+                    style={{
+                        width: "fit-content",
+                        border: "1px solid rgba(255, 255, 255, 0.14)",
+                        padding: "8px",
+                        borderRadius: "5px",
+                        backgroundColor: "#1c1c1c",
+                        marginBottom: "14px"
+                    }}
+                >
                     {content}
                 </div>
             </div>
@@ -44,7 +48,17 @@ const UserMessage = (content, i, setInputContent, currentChat, setCurrentChat, s
     )
 }
 
-const ModelMessage = MarkdownComponent
+const ModelMessage = (content, i) => {
+    return (
+        <div 
+            role="article"
+            aria-label="Assistant response"
+            style={{ marginBottom: "14px" }}
+        >
+            {MarkdownComponent(content)}
+        </div>
+    )
+}
 
 export default function Home() {
     var host = "http://127.0.0.1"
@@ -374,75 +388,141 @@ export default function Home() {
 
     return (
         <ClickSpark>
-            <div style={{ minHeight: "100vh", width: "100vw", backgroundColor: "#111", overflowY: "auto", color: "white" }} ref={chatboxRef} id="chatbox" onScroll={(e) => {
-                if (!isResponding) {
-                    return
-                }
-                const curr = e.target.scrollTop;
-                if (curr + 10 < prevScrollTop.current) {
-                    console.log("scrolled up")
-                    setAutoScroll(false);
-                }
-                prevScrollTop.current = curr;
-            }}>
-                <div style={{ height: "76vh", "width": "100%" }}>
+            <main 
+                role="main"
+                aria-label="Chat interface"
+                style={{ minHeight: "100vh", width: "100vw", backgroundColor: "#111", overflowY: "auto", color: "white" }} 
+                ref={chatboxRef} 
+                id="chatbox" 
+                onScroll={(e) => {
+                    if (!isResponding) {
+                        return
+                    }
+                    const curr = e.target.scrollTop;
+                    if (curr + 10 < prevScrollTop.current) {
+                        console.log("scrolled up")
+                        setAutoScroll(false);
+                    }
+                    prevScrollTop.current = curr;
+                }}
+            >
+                <section 
+                    aria-label="Chat messages"
+                    style={{ height: "76vh", "width": "100%" }}
+                >
                     <div style={{ height: "100%", width: "100%" }} className="flex justify-center items-center">
-                        <div style={{ height: "100%", width: "60%", marginTop: "50px" }}>
+                        <div 
+                            role="log"
+                            aria-live="polite"
+                            aria-label="Conversation history"
+                            style={{ height: "100%", width: "60%", marginTop: "50px" }}
+                        >
                             {chatId == null ? <>
                                 <div style={{ height: "100%", width: "100%" }} className="flex justify-center items-center">
                                     <div>
                                         <h1 className="text-4xl mt-10 text-center">What's on your mind today?</h1>
-                                        <div className="flex justify-center items-center text-center" style={{ color: "#A1A1AA", marginTop: "14px" }}>
+                                        <p 
+                                            className="flex justify-center items-center text-center" 
+                                            style={{ color: "#A1A1AA", marginTop: "14px" }}
+                                            aria-label="Keyboard shortcut: Press Tab to open command palette"
+                                        >
                                             Press the Tab Key to open the Command Pallette
-                                        </div>
+                                        </p>
                                     </div>
                                 </div>
                             </> : ""}
                             {currentChat.map((item, i) => {
                                 if (item.role == "user") {
-                                    return UserMessage(item.parts[0].text, Number(i), setInputContent, currentChat, setCurrentChat, setIsResponding)
+                                    return <div key={i}>{UserMessage(item.parts[0].text, Number(i), setInputContent, currentChat, setCurrentChat, setIsResponding)}</div>
                                 } else {
-                                    return ModelMessage(item.parts[0].text)
+                                    return <div key={i}>{ModelMessage(item.parts[0].text, i)}</div>
                                 }
                             })}
-                            {isResponding && <p className="shiny-text">Calliope is working for you!</p>}
+                            {isResponding && (
+                                <div 
+                                    aria-live="polite"
+                                    aria-label="Status update"
+                                    className="shiny-text"
+                                    role="status"
+                                >
+                                    Calliope is working for you!
+                                </div>
+                            )}
                             <div style={{ height: "28vh" }}></div>
                         </div>
                     </div>
                 </div>
-                {!autoScroll && <div style={{ position: "absolute", bottom: "26vh", width: "100vw" }} className="flex justify-center items-center">
-                    <Button style={{ backgroundColor: "rgb(28, 28, 28)", border: "1px solid rgba(255, 255, 255, 0.14)" }} isIconOnly
-                        onPress={() => {
-                            const el = chatboxRef.current;
-                            const here = el.scrollTop;
-                            el.scrollTo({ top: here, behavior: "instant" });
-                            setAutoScroll(true)
-                        }}
-                    ><ArrowDown></ArrowDown></Button>
-                </div>}
-                <div style={{ height: "24vh", "width": "100%", position: "fixed" }} className="flex justify-center items-center">
+                {!autoScroll && (
+                    <div style={{ position: "absolute", bottom: "26vh", width: "100vw" }} className="flex justify-center items-center">
+                        <Button 
+                            style={{ backgroundColor: "rgb(28, 28, 28)", border: "1px solid rgba(255, 255, 255, 0.14)" }} 
+                            isIconOnly
+                            aria-label="Scroll to bottom of chat"
+                            onPress={() => {
+                                const el = chatboxRef.current;
+                                const here = el.scrollTop;
+                                el.scrollTo({ top: here, behavior: "instant" });
+                                setAutoScroll(true)
+                            }}
+                        >
+                            <ArrowDown aria-hidden="true" />
+                        </Button>
+                    </div>
+                )}
+                <section 
+                    aria-label="Message input area"
+                    style={{ height: "24vh", "width": "100%", position: "fixed" }} 
+                    className="flex justify-center items-center"
+                >
                     <div className="flex flex-col" style={{ height: "100%", width: "50%", border: "1px solid rgba(255, 255, 255, 0.14)", borderBottom: "none", borderTopLeftRadius: "14px", borderTopRightRadius: "14px", background: "#1c1c1c" }}>
                         <div style={{ height: "auto", padding: "8px" }} className="flex-1">
-                            <textarea style={{ height: "90%", width: "97.5%", border: "none", padding: "5px", backgroundColor: "#1c1c1c" }}
+                            <label htmlFor="chat-input" className="sr-only">
+                                Chat message input
+                            </label>
+                            <textarea 
+                                id="chat-input"
+                                aria-label="Type your message here. Press Enter to send, Tab to open command palette"
+                                style={{ 
+                                    height: "90%", 
+                                    width: "97.5%", 
+                                    border: "none", 
+                                    padding: "5px", 
+                                    backgroundColor: "#1c1c1c",
+                                    outline: "2px solid transparent",
+                                    transition: "outline-color 0.15s ease-in-out"
+                                }}
                                 onInput={(x) => {
                                     setInputContent(x.target.value)
+                                }}
+                                onFocus={(e) => {
+                                    e.target.style.outline = "2px solid #0ea5e9"
+                                }}
+                                onBlur={(e) => {
+                                    e.target.style.outline = "2px solid transparent"
                                 }}
                                 value={inputContent}
                                 placeholder="Write your message here"
                                 autoFocus
-                            >
-                            </textarea>
+                            />
                         </div>
                         <div style={{ height: "auto" }}>
                             <div style={{ float: "right", marginRight: "10px", marginBottom: "10px", cursor: "pointer" }} className="flex justify-center items-center">
-                                <Button variant="faded" size="sm" style={{ marginRight: "10px" }} onPress={() => {
-                                    onOpen()
-                                }}>Open VS Code</Button>
+                                <Button 
+                                    variant="faded" 
+                                    size="sm" 
+                                    style={{ marginRight: "10px" }}
+                                    aria-label="Open VS Code editor"
+                                    onPress={() => {
+                                        onOpen()
+                                    }}
+                                >
+                                    Open VS Code
+                                </Button>
                             </div>
                         </div>
                     </div>
-                </div>
-            </div>
+                </section>
+            </main>
             <div
                 style={{
                     display: isOpen ? "block" : "none",
@@ -455,9 +535,13 @@ export default function Home() {
                     zIndex: 10
                 }}
                 onClick={() => onOpenChange(false)}
+                aria-hidden="true"
             />
 
             <div
+                role="dialog"
+                aria-label="VS Code editor"
+                aria-modal="true"
                 style={{
                     display: isOpen ? "block" : "none",
                     position: "fixed",
@@ -477,21 +561,61 @@ export default function Home() {
                     }
                 }} />
             </div>
-            <Modal isOpen={ChatHistoryModalIsOpen} placement="top" onOpenChange={ChatHistoryModalOnOpenChange} backdrop="blur" hideCloseButton>
+            <Modal 
+                isOpen={ChatHistoryModalIsOpen} 
+                placement="top" 
+                onOpenChange={ChatHistoryModalOnOpenChange} 
+                backdrop="blur" 
+                hideCloseButton
+                aria-label="Chat history and commands"
+            >
                 <ModalContent style={{ padding: "10px", maxWidth: "100vw", width: "fit-content" }}>
                     {
                         (onClose) => (
                             <>
-                                <textarea id="queryInput" style={{ padding: "14px", width: "60vw", fontSize: "20px", borderTopRightRadius: "10px", borderTopLeftRadius: "10px", borderBottomLeftRadius: ChatHistoryQueryResults.length == 0 ? "10px" : null, borderBottomRightRadius: ChatHistoryQueryResults.length == 0 ? "10px" : null }} rows={1} autoFocus
+                                <label htmlFor="queryInput" className="sr-only">
+                                    Search chat history or run commands
+                                </label>
+                                <textarea 
+                                    id="queryInput" 
+                                    aria-label="Search chat history or run commands. Use arrow keys to navigate results, Enter to select"
+                                    style={{ 
+                                        padding: "14px", 
+                                        width: "60vw", 
+                                        fontSize: "20px", 
+                                        borderTopRightRadius: "10px", 
+                                        borderTopLeftRadius: "10px", 
+                                        borderBottomLeftRadius: ChatHistoryQueryResults.length == 0 ? "10px" : null, 
+                                        borderBottomRightRadius: ChatHistoryQueryResults.length == 0 ? "10px" : null,
+                                        outline: "none",
+                                        border: "2px solid #0ea5e9"
+                                    }} 
+                                    rows={1} 
+                                    autoFocus
                                     value={chatHistoryInputText}
                                     placeholder="Write your query here"
                                     onInput={(e) => {
                                         setChatHistoryInputText(e.target.value)
                                     }}
-                                ></textarea>
-                                {ChatHistoryQueryResults.map((x, i) =>
-                                    <>
-                                        <div id={"selection_" + i} style={{ width: queryInputCurrentWidth, backgroundColor: selectedItem == i ? "#222" : "#111", padding: "8px", borderBottomRightRadius: i == ChatHistoryQueryResults.length - 1 ? "10px" : "", borderBottomLeftRadius: i == ChatHistoryQueryResults.length - 1 ? "10px" : "", cursor: "pointer" }}
+                                />
+                                <div role="listbox" aria-label="Search results">
+                                    {ChatHistoryQueryResults.map((x, i) =>
+                                        <div 
+                                            key={i}
+                                            id={"selection_" + i}
+                                            role="option"
+                                            aria-selected={selectedItem === i}
+                                            aria-label={`${x.date === "Command" ? "Command" : "Chat"}: ${x.title}`}
+                                            tabIndex={0}
+                                            style={{ 
+                                                width: queryInputCurrentWidth, 
+                                                backgroundColor: selectedItem == i ? "#222" : "#111", 
+                                                padding: "8px", 
+                                                borderBottomRightRadius: i == ChatHistoryQueryResults.length - 1 ? "10px" : "", 
+                                                borderBottomLeftRadius: i == ChatHistoryQueryResults.length - 1 ? "10px" : "", 
+                                                cursor: "pointer",
+                                                outline: selectedItem === i ? "2px solid #0ea5e9" : "none"
+                                            }}
                                             onClick={(event) => {
                                                 if (event.target.id == "") {
                                                     event.target = event.target.parentElement
@@ -511,12 +635,18 @@ export default function Home() {
                                                 }
                                                 e.target.style.backgroundColor = selectedItem == i ? "#222" : "#111"
                                             }}
+                                            onKeyDown={(e) => {
+                                                if (e.key === "Enter" || e.key === " ") {
+                                                    e.preventDefault()
+                                                    ChatHistoryKeyboardHandler({ "key": "Enter" })
+                                                }
+                                            }}
                                         >
-                                            <h1 style={{ overflow: "hidden", "whiteSpace": "nowrap", "textOverflow": "ellipsis", display: "block" }}>{x.title.replace(/\n/g, ' ')}</h1>
-                                            <h2>{x.date}</h2>
+                                            <h3 style={{ overflow: "hidden", "whiteSpace": "nowrap", "textOverflow": "ellipsis", display: "block" }}>{x.title.replace(/\n/g, ' ')}</h3>
+                                            <p style={{ fontSize: "smaller", opacity: 0.7 }}>{x.date}</p>
                                         </div>
-                                    </>
-                                )}
+                                    )}
+                                </div>
                             </>
                         )
                     }
