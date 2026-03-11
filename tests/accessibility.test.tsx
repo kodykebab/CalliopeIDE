@@ -22,7 +22,7 @@ jest.mock('next/router', () => ({
   }),
 }))
 
-jest.mock('../../scripts/streamer', () => ({
+jest.mock('../scripts/streamer', () => ({
   streamGeminiResponse: jest.fn(),
 }))
 
