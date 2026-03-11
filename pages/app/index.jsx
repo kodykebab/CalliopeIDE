@@ -646,7 +646,7 @@ export default function Home() {
                                                 }
                                             }}
                                         >
-                                            <h3 style={{ overflow: "hidden", "whiteSpace": "nowrap", "textOverflow": "ellipsis", display: "block" }}>{x.title.replace(/\n/g, ' ')}</h3>
+                                            <div style={{ overflow: "hidden", whiteSpace: "nowrap", textOverflow: "ellipsis", display: "block" }}>{x.title.replace(/\n/g, " ")}</div>
                                             <p style={{ fontSize: "smaller", opacity: 0.7 }}>{x.date}</p>
                                         </div>
                                     )}
