@@ -25,9 +25,9 @@ export default function Document() {
   return (
     <Html lang="en" suppressHydrationWarning>
       <Head>
+        <title>Calliope</title>
         <script dangerouslySetInnerHTML={{ __html: themeScript }} />
       </Head>
-      <title>Calliope</title>
       <body
         className={clsx(
           "min-h-screen bg-background text-foreground font-sans antialiased",
