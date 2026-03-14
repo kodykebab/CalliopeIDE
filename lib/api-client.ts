@@ -14,6 +14,9 @@ const FRIENDLY_ERRORS: Record<string, string> = {
 };
 
 const DEFAULT_ERROR = "Something went wrong. Please try again.";
+const SAFE_CLIENT_ERRORS = new Set<string>([
+  "Received an unexpected response from the server.",
+]);
 
 /**
  * Maps an unknown thrown value to a user-friendly string.
@@ -86,8 +89,13 @@ export async function apiFetch<T = unknown>(
     if ((err as Error).name === "AbortError") {
       throw new Error(FRIENDLY_ERRORS["timeout"]);
     }
-    // Re-throw already-friendly messages from the block above unchanged
-    if (err instanceof Error && Object.values(FRIENDLY_ERRORS).includes(err.message)) {
+    // Re-throw already-friendly and known safe client messages unchanged
+    if (
+      err instanceof Error &&
+      (Object.values(FRIENDLY_ERRORS).includes(err.message) ||
+        SAFE_CLIENT_ERRORS.has(err.message) ||
+        err.message.startsWith("Request failed ("))
+    ) {
       throw err;
     }
     // Map anything else (TypeError: Failed to fetch, etc.) to friendly form
