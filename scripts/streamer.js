@@ -34,7 +34,7 @@ export async function streamGeminiResponse(endpoint, message, onUpdate, onEnd, o
         signal.addEventListener("abort", () => controller.abort());
     }
 
-    const handleError = (err) => {
+    const mapToFriendlyError = (err) => {
         let friendly = STREAM_ERRORS.default;
 
         if (err && err.name === "AbortError") {
@@ -52,6 +52,10 @@ export async function streamGeminiResponse(endpoint, message, onUpdate, onEnd, o
             }
         }
 
+        return friendly;
+    };
+
+    const notifyOrThrow = (friendly) => {
         if (typeof onError === "function") {
             onError(friendly);
         } else {
@@ -71,18 +75,21 @@ export async function streamGeminiResponse(endpoint, message, onUpdate, onEnd, o
                 signal: controller.signal,
             });
         } catch (fetchErr) {
-            handleError(fetchErr);
+            const friendly = mapToFriendlyError(fetchErr);
+            notifyOrThrow(friendly);
             return;
         }
 
         if (!response.ok) {
             const sentinelErr = new Error(`SERVER_${STREAM_ERRORS.serverError(response.status)}`);
-            handleError(sentinelErr);
+            const friendly = mapToFriendlyError(sentinelErr);
+            notifyOrThrow(friendly);
             return;
         }
 
         if (!response.body) {
-            handleError(new Error(STREAM_ERRORS.noBody));
+            const friendly = mapToFriendlyError(new Error(STREAM_ERRORS.noBody));
+            notifyOrThrow(friendly);
             return;
         }
 
@@ -95,7 +102,8 @@ export async function streamGeminiResponse(endpoint, message, onUpdate, onEnd, o
                 try {
                     ({ done, value } = await reader.read());
                 } catch (readErr) {
-                    handleError(readErr);
+                    const friendly = mapToFriendlyError(readErr);
+                    notifyOrThrow(friendly);
                     return;
                 }
 
@@ -118,7 +126,8 @@ export async function streamGeminiResponse(endpoint, message, onUpdate, onEnd, o
 
         onEnd();
     } catch (unexpectedErr) {
-        handleError(unexpectedErr);
+        const friendly = mapToFriendlyError(unexpectedErr);
+        notifyOrThrow(friendly);
     } finally {
         clearTimeout(timeoutId);
     }
