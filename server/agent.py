@@ -6,6 +6,7 @@ import time
 import re
 import google.generativeai as genai
 import threading
+import dataclasses
 import flask
 from flask import Response, request, stream_with_context
 
@@ -38,29 +39,37 @@ def add_cors_headers(response):
     return response
 
 
-output = []
-user_input = ""
-stop_stream = False
-input_requested = False
+# Previously these were module-level globals shared across all requests.
+# Concurrent users would overwrite each other's output buffers and control flags.
+# Now each request gets its own isolated context object instead.
+@dataclasses.dataclass
+class AgentRequestContext:
+    output: list = dataclasses.field(default_factory=list)
+    user_input: str = ""
+    stop_stream: bool = False
+    input_requested: bool = False
+    lock: threading.Lock = dataclasses.field(default_factory=threading.Lock)
 
 
-def input(x):
-    global stop_stream, user_input, input_requested
-    user_input = ""
-    input_requested = True
-    stop_stream = True
+def ctx_input(ctx, x):
+    with ctx.lock:
+        ctx.user_input = ""
+        ctx.input_requested = True
+        ctx.stop_stream = True
     while True:
         time.sleep(0.25)
-        if user_input != "":
-            input_value = user_input
-            user_input = ""
-            input_requested = False
-            stop_stream = False
-            return input_value
+        with ctx.lock:
+            if ctx.user_input != "":
+                input_value = ctx.user_input
+                ctx.user_input = ""
+                ctx.input_requested = False
+                ctx.stop_stream = False
+                return input_value
 
 
-def print(x):
-    output.append(x)
+def ctx_print(ctx, x):
+    with ctx.lock:
+        ctx.output.append(x)
 
 
 @app.route("/", methods=["GET"])
@@ -77,25 +86,28 @@ def send_query():
 
     data = sanitize_agent_input(data)
 
-    global output, user_input, stop_stream, input_requested
-    input_requested = False
-    stop_stream = False
-    output.clear()
-    user_input = data
+    ctx = AgentRequestContext()
+    ctx.user_input = data
+
+    threading.Thread(target=main, args=(ctx,), daemon=True).start()
 
     def generate():
-        global stop_stream, input_requested
         last_length = 0
         while True:
-            if len(output) > last_length:
-                for x in output[last_length:]:
-                    yield f"data: {json.dumps({'type': 'output', 'data': x})}\n\n".encode()
-                last_length = len(output)
+            with ctx.lock:
+                current_output = list(ctx.output)
+                should_stop = ctx.stop_stream
+                needs_input = ctx.input_requested
 
-            if input_requested:
+            if len(current_output) > last_length:
+                for x in current_output[last_length:]:
+                    yield f"data: {json.dumps({'type': 'output', 'data': x})}\n\n".encode()
+                last_length = len(current_output)
+
+            if needs_input:
                 yield f"data: {json.dumps({'type': 'input_required'})}\n\n".encode()
                 break
-            if stop_stream and not input_requested:
+            if should_stop and not needs_input:
                 break
 
             time.sleep(0.25)
@@ -110,13 +122,13 @@ def send_query():
     return response
 
 
-def execute_command(cmd: str) -> str:
+def execute_command(cmd: str, ctx=None) -> str:
     if is_dangerous_command(cmd):
         blocked_msg = f"BLOCKED: Command '{cmd}' matches a disallowed pattern and was not executed."
-        print(blocked_msg)
+        if ctx: ctx_print(ctx, blocked_msg)
         return blocked_msg
 
-    print(f"Agent is executing command ```{cmd.replace('`', \"'\")}```")
+    if ctx: ctx_print(ctx, f"Agent is executing command ```{cmd.replace('`', \"'\")}```")
 
     if len(cmd) > 1000:
         return "ERROR: Command too long (max 1000 characters)"
@@ -243,8 +255,6 @@ Format your response as valid JSON without any text outside the JSON structure.
             corrected_response = chat.send_message(correction_prompt)
             return extract_json(corrected_response.text), corrected_response
     except Exception as e:
-        print(f"Error handling model response: {str(e)}")
-
         error_prompt = f"""
 Error parsing your response: {str(e)}
 
@@ -402,9 +412,7 @@ Also smart contracts are only supposed to be inside the inner src directory, the
 Remember: You are a SELF-SUFFICIENT AUTONOMOUS AGENT. Explore, understand, and solve problems YOURSELF.""")
 
 
-def main():
-    global stop_stream
-
+def main(ctx):
     model = genai.GenerativeModel(
         model_name="gemini-2.0-flash",
         generation_config={
@@ -429,21 +437,21 @@ Always respond in valid JSON format without any text outside the JSON structure.
 
     response = chat.send_message(system_prompt_intro + "\n\n" + system_prompt)
 
-    print("=== Autonomous Gemini Agent ===")
-    print("Give me a task and I'll handle it from start to finish.")
-    print("Type 'exit' or 'quit' to end session\n")
+    ctx_print(ctx, "=== Autonomous Gemini Agent ===")
+    ctx_print(ctx, "Give me a task and I'll handle it from start to finish.")
+    ctx_print(ctx, "Type 'exit' or 'quit' to end session\n")
 
     while True:
-        user_input = input("1")
+        user_input = ctx_input(ctx, "1")
 
         if user_input.lower() in ['exit', 'quit']:
-            print("Goodbye!")
+            ctx_print(ctx, "Goodbye!")
             break
 
         task_complete = False
         need_user_input = False
 
-        print("Agent is working on your task now")
+        ctx_print(ctx, "Agent is working on your task now")
 
         try:
             initial_prompt = f"""
@@ -468,11 +476,11 @@ REMEMBER: Keep your response VERY BRIEF to avoid truncation.
                     thinking = parsed.get("thinking", "")
                     if thinking:
                         trimmed_thinking = thinking
-                        print(f"{trimmed_thinking}")
+                        ctx_print(ctx, f"{trimmed_thinking}")
 
                     message = parsed.get("message", "")
                     if message:
-                        print(f"{message}")
+                        ctx_print(ctx, f"{message}")
 
                     commands = parsed.get("commands", [])
                     if commands:
@@ -482,8 +490,8 @@ REMEMBER: Keep your response VERY BRIEF to avoid truncation.
                             if cmd.startswith('"') and cmd.endswith('"'):
                                 cmd = cmd[1:-1]
 
-                            cmd_output = execute_command(cmd)
-                            print(f"CLI Output: ```{cmd_output[:1000].replace('`', \"'\")}```")
+                            cmd_output = execute_command(cmd, ctx)
+                            ctx_print(ctx, f"CLI Output: ```{cmd_output[:1000].replace('`', \"'\")}```")
                             all_outputs.append(f"Command: {cmd}\nOutput: {cmd_output}")
 
                         full_output = "\n\n".join(all_outputs)
@@ -507,7 +515,7 @@ REMEMBER: Keep your response VERY BRIEF to avoid truncation.
                     need_user_input = parsed.get("need_user_input", False)
 
                     if need_user_input and not task_complete:
-                        user_response = input("2")
+                        user_response = ctx_input(ctx, "2")
                         response = chat.send_message(
                             f"User input: {user_response}\n\n" +
                             "Continue the task based on this input. Remember to keep your JSON response simple and brief."
@@ -517,7 +525,7 @@ REMEMBER: Keep your response VERY BRIEF to avoid truncation.
                     time.sleep(0.5)
 
                 except Exception as e:
-                    print(f"Error in processing response: {str(e)}")
+                    ctx_print(ctx, f"Error in processing response: {str(e)}")
 
                     response = chat.send_message(
                         "There was an error processing your response. Please provide a VERY SIMPLE response with:\n" +
@@ -528,11 +536,11 @@ REMEMBER: Keep your response VERY BRIEF to avoid truncation.
                         "5. need_user_input=false\n\n" +
                         "Keep your response under 500 characters total."
                     )
-            stop_stream = True
+            with ctx.lock:
+                ctx.stop_stream = True
         except Exception as e:
-            print(f"Error: {str(e)}")
-            print("Error Occured but all is good")
+            ctx_print(ctx, f"Error: {str(e)}")
+            ctx_print(ctx, "Error Occured but all is good")
 
 
-threading.Thread(target=main).start()
 app.run(port=int(sys.argv[1]))
