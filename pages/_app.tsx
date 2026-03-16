@@ -14,25 +14,6 @@ export default function App({ Component, pageProps }: AppProps) {
 
   useEffect(() => {
     initializeMonitoring();
-
-    const handleError = (event: ErrorEvent) => {
-      if (event.error) {
-        captureException(event.error, { source: "window.error" });
-      }
-    };
-
-    const handleRejection = (event: PromiseRejectionEvent) => {
-      const error = event.reason instanceof Error ? event.reason : new Error("Unhandled promise rejection");
-      captureException(error, { source: "window.unhandledrejection" });
-    };
-
-    window.addEventListener("error", handleError);
-    window.addEventListener("unhandledrejection", handleRejection);
-
-    return () => {
-      window.removeEventListener("error", handleError);
-      window.removeEventListener("unhandledrejection", handleRejection);
-    };
   }, []);
 
   return (
