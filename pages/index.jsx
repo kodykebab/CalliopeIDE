@@ -12,15 +12,10 @@ import { HeroImage } from "@/components/hero-image"
 import { LogoCloud } from "@/components/logo-cloud"
 import { ThemeToggle } from "@/components/theme-toggle"
 import { TextReveal } from "@/components/text-reveal"
-import { apiRequest } from "@/lib/api-client"
-import { captureException } from "@/lib/monitoring"
 import { cn } from "@/lib/utils"
 
 export default function Home() {
     const [scrolled, setScrolled] = useState(false)
-    const [projectPrompt, setProjectPrompt] = useState("")
-    const [isGenerating, setIsGenerating] = useState(false)
-    const [generateError, setGenerateError] = useState("")
     const heroRef = useRef(null)
     const featuresRef = useRef(null)
     const { scrollYProgress } = useScroll()
@@ -35,39 +30,6 @@ export default function Home() {
         window.addEventListener("scroll", handleScroll)
         return () => window.removeEventListener("scroll", handleScroll)
     }, [])
-
-    const handleProjectGeneration = async (event) => {
-        event.preventDefault()
-        if (!projectPrompt.trim()) {
-            setGenerateError("Please describe your project idea before generating.")
-            return
-        }
-
-        setIsGenerating(true)
-        setGenerateError("")
-
-        try {
-            await apiRequest("/api/generate", {
-                method: "POST",
-                headers: {
-                    "Content-Type": "application/json",
-                },
-                body: JSON.stringify({ prompt: projectPrompt.trim() }),
-            }, {
-                friendlyErrorMessage: "Project generation is currently unavailable. Please try again shortly.",
-            })
-
-            window.location.assign("/app")
-        } catch (error) {
-            const safeMessage = error?.userMessage || "Unable to generate project right now."
-            setGenerateError(safeMessage)
-            captureException(error instanceof Error ? error : new Error("Project generation failed"), {
-                source: "landing.generate_project",
-            })
-        } finally {
-            setIsGenerating(false)
-        }
-    }
 
     return (
         <div data-testid="home-shell" className="flex flex-col min-h-screen bg-background text-foreground overflow-hidden transition-colors duration-300">
@@ -391,30 +353,23 @@ export default function Home() {
                                 <div className="absolute -inset-px theme-cta-overlay rounded-xl opacity-50 blur-sm"></div>
                                 <div data-testid="chat-surface" className="theme-panel relative rounded-xl border backdrop-blur-sm shadow-2xl overflow-hidden">
                                     <div className="p-6 relative">
-                                        <form onSubmit={handleProjectGeneration}>
+                                        <form action="/api/generate" method="POST">
                                             <textarea
                                                 className="theme-editor-surface min-h-[200px] w-full rounded-md border px-3 py-2 text-sm text-foreground placeholder:text-foreground/40 focus:border-border focus:ring-1 focus:ring-ring focus-visible:outline-none transition-all duration-300"
                                                 placeholder="Describe your Soroban smart contract idea or project requirements..."
                                                 name="prompt"
-                                                value={projectPrompt}
-                                                onChange={(event) => setProjectPrompt(event.target.value)}
-                                                disabled={isGenerating}
                                                 required
                                             ></textarea>
-                                            {generateError && (
-                                                <p className="mt-3 text-sm text-red-500" role="alert" aria-live="polite">
-                                                    {generateError}
-                                                </p>
-                                            )}
                                             <div className="mt-4 flex justify-end">
-                                                <Button
-                                                    type="submit"
-                                                    disabled={isGenerating}
-                                                    className="bg-[#9FEF00] text-black hover:bg-[#9FEF00]/80 gap-2 h-10 px-4 rounded-md group disabled:opacity-70"
-                                                >
-                                                    {isGenerating ? "Generating..." : "Generate Project"}
-                                                    <ArrowRight className="size-4 transition-transform group-hover:translate-x-1" />
-                                                </Button>
+                                                <Link href="/app">
+                                                    <Button
+                                                        type="submit"
+                                                        className="bg-[#9FEF00] text-black hover:bg-[#9FEF00]/80 gap-2 h-10 px-4 rounded-md group"
+                                                    >
+                                                        Generate Project
+                                                        <ArrowRight className="size-4 transition-transform group-hover:translate-x-1" />
+                                                    </Button>
+                                                </Link>
                                             </div>
                                         </form>
                                     </div>

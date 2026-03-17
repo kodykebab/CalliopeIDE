@@ -7,8 +7,6 @@ import random
 import shutil
 import subprocess
 import threading
-import glob
-import logging
 from flask import Flask, jsonify, request
 from flask_cors import CORS
 from dotenv import load_dotenv
@@ -21,7 +19,6 @@ from server.routes import auth_bp
 from server.routes.chat_routes import chat_bp
 from server.routes.project_routes import project_bp
 from server.utils import token_required, secure_execute, SecurityError
-from server.utils.monitoring import init_monitoring, capture_exception, safe_error_response
 from server.utils.db_utils import create_session_for_user, add_chat_message, ensure_database_directory, get_database_stats
 
 
@@ -42,12 +39,8 @@ threading.Thread(
 
 app = Flask(__name__)
 
-logging.basicConfig(level=getattr(logging, os.getenv('LOG_LEVEL', 'INFO').upper(), logging.INFO))
-
-app_env = os.getenv('APP_ENV', os.getenv('FLASK_ENV', 'production'))
-
 # Configuration
-app.config['SECRET_KEY'] = os.getenv('SECRET_KEY') or os.urandom(32).hex()
+app.config['SECRET_KEY'] = os.getenv('SECRET_KEY', 'dev-secret-key-change-in-production')
 BASE_DIR = os.path.abspath(os.path.dirname(__file__))
 DB_PATH = os.path.join(BASE_DIR, "..", "data", "calliope.db")
 
@@ -58,10 +51,7 @@ app.config['SQLALCHEMY_DATABASE_URI'] = os.getenv(
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 app.config['JSON_SORT_KEYS'] = False
 
-init_monitoring(app)
-
-default_cors_origins = 'http://localhost:3000,http://localhost:5173' if app_env == 'development' else ''
-cors_origins = [origin.strip() for origin in os.getenv('CORS_ORIGINS', default_cors_origins).split(',') if origin.strip()]
+cors_origins = os.getenv('CORS_ORIGINS', 'http://localhost:3000,http://localhost:5173').split(',')
 CORS(app, resources={r"/*": {"origins": cors_origins}}, supports_credentials=True)
 
 # Initialize database and register blueprints
@@ -84,9 +74,7 @@ if LIMITER_AVAILABLE and os.getenv('RATE_LIMIT_ENABLED', 'true').lower() == 'tru
 count = 0
 lock = threading.Lock()
 
-if os.getenv('CLEANUP_INSTANCES_ON_START', 'false').lower() == 'true':
-    for instance_path in glob.glob('instance*_user*'):
-        shutil.rmtree(instance_path, ignore_errors=True)
+os.system("rm -rf instance*/")
 
 @app.route("/", methods=["GET"])
 @token_required
@@ -145,9 +133,12 @@ def create_session(current_user):
         }), 200
         
     except Exception as e:
-        app.logger.exception("Session creation failed")
-        capture_exception(e, {'route': 'create_session', 'user_id': current_user.id})
-        return safe_error_response('Failed to create session', 500)
+        print(f"Session creation error: {str(e)}")
+        return jsonify({
+            'success': False,
+            'error': 'Failed to create session',
+            'message': str(e)
+        }), 500
 
 
 @app.route("/sessions", methods=["GET"])
@@ -185,9 +176,12 @@ def get_user_sessions(current_user):
         }), 200
         
     except Exception as e:
-        app.logger.exception("Get sessions failed")
-        capture_exception(e, {'route': 'get_user_sessions', 'user_id': current_user.id})
-        return safe_error_response('Failed to retrieve sessions', 500)
+        print(f"Get sessions error: {str(e)}")
+        return jsonify({
+            'success': False,
+            'error': 'Failed to retrieve sessions',
+            'message': str(e)
+        }), 500
 
 
 @app.route('/health', methods=['GET'])
@@ -229,9 +223,8 @@ def database_stats(current_user):
         }), 200
         
     except Exception as e:
-        app.logger.exception("Stats request failed")
-        capture_exception(e, {'route': 'database_stats', 'user_id': current_user.id})
-        return safe_error_response('Failed to retrieve statistics', 500)
+        print(f"Stats error: {str(e)}")
+        return jsonify({'success': False, 'error': 'Failed to retrieve statistics'}), 500
 
 
 @app.route('/api/info', methods=['GET'])
@@ -399,7 +392,6 @@ def execute_code_internal(current_user):
     
     except Exception as e:
         app.logger.error(f"Unexpected error in execute_code: {str(e)}")
-        capture_exception(e, {'route': 'execute_code', 'user_id': current_user.id if current_user else None})
         return jsonify({
             'success': False,
             'status': 'error',
@@ -426,15 +418,7 @@ def not_found(error):
 
 @app.errorhandler(500)
 def internal_error(error):
-    capture_exception(error, {'route': 'internal_error'})
     return jsonify({'success': False, 'error': 'Internal server error'}), 500
-
-
-@app.errorhandler(Exception)
-def handle_unexpected_error(error):
-    app.logger.exception("Unhandled exception")
-    capture_exception(error, {'route': 'unhandled_exception'})
-    return jsonify({'success': False, 'error': 'Unexpected server error'}), 500
 
 
 if __name__ == "__main__":

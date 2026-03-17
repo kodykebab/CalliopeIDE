@@ -117,16 +117,9 @@ Calliope IDE addresses these challenges by providing:
     ```
 
 4.  **Set up Environment Variables**:
-    Copy the provided template and set real values:
+    Create a `.env.local` file in the root directory (optional but recommended for Next.js) or export variables directly:
     ```bash
-    cp .env.example .env.local
-    ```
-    At minimum, configure API URL, secrets, and AI key:
-    ```bash
-    export NEXT_PUBLIC_API_URL="http://localhost:5000"
     export GEMINI_API_KEY="your_google_gemini_api_key"
-    export SECRET_KEY="your_strong_secret"
-    export JWT_SECRET_KEY="your_strong_jwt_secret"
     ```
 
 ### Running Locally
@@ -205,22 +198,12 @@ docker-compose -f docker-compose.yml -f docker-compose.dev.yml up --build
 | `FRONTEND_PORT` | `3000` | Port for the Next.js frontend |
 | `BACKEND_PORT` | `5000` | Port for the Flask backend |
 | `FLASK_ENV` | `production` | Flask environment (`production` or `development`) |
-| `APP_ENV` | `production` | Logical app environment for monitoring and config |
-| `NEXT_PUBLIC_API_URL` | `http://backend:5000` | Frontend API base URL |
-| `NEXT_PUBLIC_APP_ENV` | `production` | Frontend environment label |
 | `SECRET_KEY` | — | Flask secret key (⚠️ change in production!) |
 | `JWT_SECRET_KEY` | — | JWT signing key (⚠️ change in production!) |
 | `JWT_ACCESS_TOKEN_EXPIRES` | `3600` | Access token lifetime in seconds |
 | `JWT_REFRESH_TOKEN_EXPIRES` | `2592000` | Refresh token lifetime in seconds |
 | `RATE_LIMIT_ENABLED` | `true` | Enable/disable API rate limiting |
 | `RATE_LIMIT_PER_MINUTE` | `60` | Max API requests per minute |
-| `SENTRY_ENABLED` | `false` | Enable backend Sentry monitoring |
-| `SENTRY_DSN` | — | Backend Sentry DSN |
-| `SENTRY_TRACES_SAMPLE_RATE` | `0` | Backend traces sample rate |
-| `NEXT_PUBLIC_SENTRY_ENABLED` | `false` | Enable frontend Sentry monitoring |
-| `NEXT_PUBLIC_SENTRY_DSN` | — | Frontend Sentry DSN |
-| `NEXT_PUBLIC_SENTRY_TRACES_SAMPLE_RATE` | `0` | Frontend traces sample rate |
-| `NEXT_PUBLIC_SENTRY_BROWSER_CDN_URL` | Sentry CDN URL | Browser SDK script URL |
 | `GEMINI_API_KEY` | — | Google Gemini API key for AI features |
 
 ### Architecture
@@ -269,31 +252,6 @@ The easiest way to deploy the Next.js frontend is to use the [Vercel Platform](h
 The Python/Flask backend needs a persistent server environment (unlike Vercel's serverless functions which have timeouts).
 - **Recommended**: Railway, Render, or a VPS (DigitalOcean/AWS).
 - Ensure the backend URL is correctly configured in the frontend (you may need to update `pages/app/index.jsx` or use an environment variable for the API URL).
-
-### Monitoring and Error Tracking (Sentry)
-- Frontend and backend monitoring are both controlled with environment variables and are disabled by default.
-- Enable backend monitoring by setting:
-    - `SENTRY_ENABLED=true`
-    - `SENTRY_DSN=<your_backend_dsn>`
-    - optional `SENTRY_TRACES_SAMPLE_RATE=0.1`
-- Enable frontend monitoring by setting:
-    - `NEXT_PUBLIC_SENTRY_ENABLED=true`
-    - `NEXT_PUBLIC_SENTRY_DSN=<your_frontend_dsn>`
-    - optional `NEXT_PUBLIC_SENTRY_TRACES_SAMPLE_RATE=0.1`
-- Sensitive request data is redacted before events are sent.
-
-### Production Build Checklist
-Run these before deploying:
-```bash
-npm ci
-npm run build
-pip install -r server/requirements.txt
-python server/start.py
-```
-Confirm:
-- Frontend starts without build errors
-- `GET /health` returns healthy
-- Required secrets are provided via environment variables
 
 ## License
 
