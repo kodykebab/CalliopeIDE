@@ -1,0 +1,15 @@
+# Core web framework
+flask>=3.0.0
+flask-cors>=4.0.0
+
+# Google Gemini AI
+google-generativeai>=0.8.0
+
+# Database
+sqlalchemy>=2.0.0
+
+# Environment variables
+python-dotenv>=1.0.0
+
+# Utilities
+requests>=2.31.0
