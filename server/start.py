@@ -33,12 +33,17 @@ try:
 except ImportError:
     LIMITER_AVAILABLE = False
 
-threading.Thread(
-    target=subprocess.Popen,
-    args=(["code-server"],),
-    kwargs={"stdout": subprocess.DEVNULL, "stderr": subprocess.DEVNULL},
-    daemon=True
-).start()
+# code-server is disabled by default to reduce attack surface and
+# follow single-responsibility container principles (issue #41).
+# Set ENABLE_CODE_SERVER=true to opt in, or run it as a separate container.
+_CODE_SERVER_ENABLED = os.getenv("ENABLE_CODE_SERVER", "false").lower() == "true"
+if _CODE_SERVER_ENABLED:
+    threading.Thread(
+        target=subprocess.Popen,
+        args=(["code-server"],),
+        kwargs={"stdout": subprocess.DEVNULL, "stderr": subprocess.DEVNULL},
+        daemon=True
+    ).start()
 
 app = Flask(__name__)
 
