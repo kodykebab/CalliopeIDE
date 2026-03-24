@@ -1,5 +1,5 @@
 "use client"
-
+import { NetworkStatus } from "@/components/network-status"
 import { useState, useEffect } from "react"
 import { motion, AnimatePresence } from "framer-motion"
 import { 
@@ -129,14 +129,28 @@ export default function IDEApp() {
 
                         {/* Sidebar Footer */}
                         <div className="p-4 border-t border-gray-700">
-                            <Button 
-                                variant="ghost" 
-                                size="sm" 
-                                className="w-full justify-start text-gray-400 hover:text-white"
-                            >
-                                <Settings className="w-4 h-4 mr-2" />
-                                Settings
-                            </Button>
+                         <Button
+                            variant="ghost"
+                            size="sm"
+                            className="hidden sm:flex p-1 h-auto text-gray-400 hover:text-white"
+                        >
+                            <Play className="w-4 h-4 mr-1" />
+                            Run
+                        </Button>
+                        
+                        {/* BURAYA EKLEME YAPIYORUZ */}
+                        <div className="hidden lg:block mx-2">
+                             <NetworkStatus className="h-8 border-none bg-transparent shadow-none" />
+                        </div>
+
+                        <Button
+                            variant="ghost"
+                            size="sm"
+                            onClick={() => setChatOpen(!chatOpen)}
+                            className="p-1 h-auto text-gray-400 hover:text-white"
+                        >
+                            <MessageSquare className="w-4 h-4" />
+                        </Button>
                         </div>
                     </motion.aside>
                 )}
