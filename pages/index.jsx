@@ -15,6 +15,7 @@ import { TextReveal } from "@/components/text-reveal"
 import { apiRequest } from "@/lib/api-client"
 import { captureException } from "@/lib/monitoring"
 import { cn } from "@/lib/utils"
+import { NetworkStatus } from "@/components/network-status"
 
 export default function Home() {
     const [scrolled, setScrolled] = useState(false)
@@ -119,17 +120,16 @@ export default function Home() {
                             <Github className="size-5" />
                             <span className="sr-only">GitHub</span>
                         </Link>
-                        <ThemeToggle />
-                        <Link href="/app">
-                            <Button className="h-8 sm:h-10 px-3 sm:px-4 text-sm bg-[#9FEF00] text-black hover:bg-[#9FEF00]/80 transition-colors">
-                                <span className="hidden sm:inline">Get Started</span>
-                                <span className="sm:hidden">Start</span>
-                            </Button>
-                        </Link>
-                    </motion.div>
-                </div>
-            </header>
-
+                     <div className="hidden sm:block"> {/* Mobilde çok kalabalık olmasın diye gizledik */}
+    <NetworkStatus />
+</div>
+<ThemeToggle />
+<Link href="/app">
+    <Button className="h-8 sm:h-10 px-3 sm:px-4 text-sm bg-[#9FEF00] text-black hover:bg-[#9FEF00]/80 transition-colors">
+        <span className="hidden sm:inline">Get Started</span>
+        <span className="sm:hidden">Start</span>
+    </Button>
+</Link>
             <main className="flex-1">
                 <section className="relative pt-20 pb-12 sm:pt-32 sm:pb-20 md:pt-40 md:pb-32" ref={heroRef}>
                     <div className="mx-auto px-4 sm:px-6 lg:px-8 w-full relative z-10">
