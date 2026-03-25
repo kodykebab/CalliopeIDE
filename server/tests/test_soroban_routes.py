@@ -17,6 +17,12 @@ sys.modules["server.models"] = MagicMock()
 sys.modules["server.utils.monitoring"] = MagicMock()
 
 import server.routes.soroban_routes as m
+
+# Restore sys.modules immediately after import to avoid contaminating other test modules
+for _mod in ["server.utils.auth_utils", "server.models", "server.utils.monitoring"]:
+    sys.modules.pop(_mod, None)
+
+
 soroban_bp = m.soroban_bp
 from flask import Flask
 
