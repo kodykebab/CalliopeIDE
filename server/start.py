@@ -17,6 +17,7 @@ from server.middleware.database import db, init_db
 from server.models import User, RefreshToken, Session, ChatHistory, ProjectMetadata
 from server.routes import auth_bp
 from server.routes.chat_routes import chat_bp
+from server.routes.soroban_routes import soroban_bp
 from server.routes.project_routes import project_bp
 from server.utils import token_required, secure_execute, SecurityError
 from server.utils.db_utils import create_session_for_user, add_chat_message, ensure_database_directory, get_database_stats
@@ -76,6 +77,7 @@ with app.app_context():
 app.register_blueprint(auth_bp)
 app.register_blueprint(chat_bp)
 app.register_blueprint(project_bp)
+app.register_blueprint(soroban_bp)
 
 if LIMITER_AVAILABLE and os.getenv('RATE_LIMIT_ENABLED', 'true').lower() == 'true':
     limiter = Limiter(
