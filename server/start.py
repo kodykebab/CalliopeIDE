@@ -21,6 +21,7 @@ from server.routes.project_routes import project_bp
 from server.utils import token_required, secure_execute, SecurityError
 from server.utils.db_utils import create_session_for_user, add_chat_message, ensure_database_directory, get_database_stats
 from server.utils.monitoring import setup_logging, init_sentry, monitor_endpoint, get_monitoring_stats
+from server.utils.structured_logging import setup_logging as setup_structured_logging, init_request_logging
 
 # Resolve agent.py path relative to this file
 _SERVER_DIR = os.path.abspath(os.path.dirname(__file__))
@@ -69,6 +70,7 @@ init_sentry(app)
 
 # Initialize database and register blueprints
 init_db(app)
+init_request_logging(app)
 
 # Ensure database directory exists after database initialization, within app context
 with app.app_context():
