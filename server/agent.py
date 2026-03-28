@@ -15,6 +15,9 @@ from server.utils.agent_validators import (
     sanitize_agent_input,
     is_dangerous_command,
 )
+# ── PR addition: context pipeline imports ─────────────────────────────────────
+from server.utils.context_builder import build_project_context, ProjectContext
+from server.utils.prompt_builder import build_prompt, build_task_prompt
 
 API_KEY = os.environ.get("GEMINI_API_KEY")
 if not API_KEY:
@@ -49,6 +52,10 @@ class AgentRequestContext:
     stop_stream: bool = False
     input_requested: bool = False
     lock: threading.Lock = dataclasses.field(default_factory=threading.Lock)
+    # ── PR addition: project context field ────────────────────────────────────
+    project_context: ProjectContext = dataclasses.field(
+        default_factory=lambda: ProjectContext(current_file=None, related_files=[])
+    )
 
 
 def ctx_input(ctx, x):
@@ -72,9 +79,40 @@ def ctx_print(ctx, x):
         ctx.output.append(x)
 
 
-@app.route("/", methods=["GET"])
+# ── PR addition: parse context_payload query param ────────────────────────────
+def _parse_context_payload(raw: str) -> ProjectContext:
+    """
+    Safely decode the optional context_payload query parameter.
+    Falls back to an empty ProjectContext on any error so the agent still runs.
+    """
+    try:
+        data = json.loads(raw)
+        return build_project_context(
+            project_path=data.get("project_path", os.getcwd()),
+            current_file_path=data.get("current_file_path"),
+            project_metadata=data.get("project_metadata"),
+            recently_modified=data.get("recently_modified", []),
+        )
+    except Exception:
+        return ProjectContext(current_file=None, related_files=[])
+
+
+@app.route("/", methods=["GET", "POST"])
 def send_query():
     data = request.args.get("data", "")
+    # ── PR addition: read context_payload from POST body (fix issue 4) ────
+    # context_payload contains file contents — keeping it out of the query
+    # string prevents it from appearing in server access logs and browser
+    # history.  POST body is used when context is available; plain GET still
+    # works for requests with no context (backwards compatible).
+    context_payload_raw = ""
+    if request.method == "POST" and request.is_json:
+        body = request.get_json(silent=True) or {}
+        context_payload_raw = json.dumps(body.get("context_payload", "")) \
+            if body.get("context_payload") else ""
+    else:
+        # fallback: still accept via query param for backwards compat / testing
+        context_payload_raw = request.args.get("context_payload", "")
 
     is_valid, error = validate_agent_input(data)
     if not is_valid:
@@ -88,6 +126,10 @@ def send_query():
 
     ctx = AgentRequestContext()
     ctx.user_input = data
+
+    # ── PR addition: attach project context if provided ────────────────────
+    if context_payload_raw:
+        ctx.project_context = _parse_context_payload(context_payload_raw)
 
     threading.Thread(target=main, args=(ctx,), daemon=True).start()
 
@@ -349,6 +391,13 @@ ALWAYS verify operations with follow-up commands:
 }
 ```
 
+### PROJECT CONTEXT:
+When a "## Project context" section appears in your instructions, use it to:
+- Understand the current file being edited
+- Reference related files without re-reading them via commands
+- Match the project's language, framework, and conventions
+- Avoid redundant exploration commands when file contents are already provided
+
 ### CORE BEHAVIORS:
 1. BE AUTONOMOUS: Explore, understand, and solve problems yourself
 2. BE AWARE: Maintain a clear understanding of the file system at all times
@@ -426,7 +475,8 @@ def main(ctx):
 
     chat = model.start_chat(history=[])
 
-    system_prompt = get_prompt()
+    # ── PR addition: build context-aware system prompt ────────────────────────
+    system_prompt = build_prompt(get_prompt(), ctx.project_context)
 
     system_prompt_intro = """
 IMPORTANT: When you respond, you MUST keep your responses concise to avoid truncation. 
@@ -454,15 +504,8 @@ Always respond in valid JSON format without any text outside the JSON structure.
         ctx_print(ctx, "Agent is working on your task now")
 
         try:
-            initial_prompt = f"""
-Task: {user_input}
-
-Break this down into small, manageable steps. Start by exploring the environment.
-REMEMBER: Keep your response VERY BRIEF to avoid truncation.
-- Limit "thinking" to 100 words max
-- Limit "message" to 150 words max
-- Include only 1-3 commands in your first response
-"""
+            # ── PR addition: context-aware task prompt ─────────────────────────
+            initial_prompt = build_task_prompt(user_input, ctx.project_context)
             response = chat.send_message(initial_prompt)
 
             while not task_complete:

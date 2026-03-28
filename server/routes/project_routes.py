@@ -5,6 +5,7 @@ from server.middleware.database import db
 from server.utils.auth_utils import token_required
 from server.utils.db_utils import create_project_metadata, update_project_metadata
 from server.utils.validators import sanitize_input
+from server.utils.context_builder import build_project_context, invalidate_cache
 import logging
 from server.utils.monitoring import capture_exception
 
@@ -12,30 +13,28 @@ project_bp = Blueprint('project', __name__, url_prefix='/api/projects')
 logger = logging.getLogger(__name__)
 
 
+# ── Existing routes (unchanged) ───────────────────────────────────────────────
+
 @project_bp.route('/', methods=['POST'])
 @token_required
 def create_project(current_user):
     """Create a new project"""
     try:
         data = request.get_json()
-        
         if not data:
             return jsonify({'success': False, 'error': 'No data provided'}), 400
-        
-        # Required fields
+
         project_name = data.get('project_name')
         if not project_name:
             return jsonify({'success': False, 'error': 'Project name is required'}), 400
-        
-        # Sanitize and validate inputs
+
         project_name = sanitize_input(project_name, 255)
         description = sanitize_input(data.get('description', ''), 1000) or None
         project_type = sanitize_input(data.get('project_type', ''), 50) or None
         language = sanitize_input(data.get('language', ''), 50) or None
         framework = sanitize_input(data.get('framework', ''), 100) or None
         project_path = sanitize_input(data.get('project_path', ''), 500) or None
-        
-        # Create project
+
         project = create_project_metadata(
             user_id=current_user.id,
             project_name=project_name,
@@ -43,15 +42,15 @@ def create_project(current_user):
             project_type=project_type,
             language=language,
             framework=framework,
-            project_path=project_path
+            project_path=project_path,
         )
-        
+
         return jsonify({
             'success': True,
             'message': 'Project created successfully',
-            'project': project.to_dict()
+            'project': project.to_dict(),
         }), 201
-        
+
     except ValueError as e:
         return jsonify({'success': False, 'error': str(e)}), 400
     except Exception as e:
@@ -66,26 +65,20 @@ def create_project(current_user):
 def list_projects(current_user):
     """List all projects for the current user"""
     try:
-        # Get filtering parameters
         active_only = request.args.get('active_only', 'true').lower() == 'true'
         project_type = request.args.get('project_type')
         language = request.args.get('language')
-        
-        # Build query
+
         query = ProjectMetadata.query.filter_by(user_id=current_user.id)
-        
         if active_only:
             query = query.filter_by(is_active=True)
-        
         if project_type:
             query = query.filter_by(project_type=project_type)
-            
         if language:
             query = query.filter_by(language=language)
-        
-        # Order by most recently updated
+
         projects = query.order_by(ProjectMetadata.updated_at.desc()).all()
-        
+
         return jsonify({
             'success': True,
             'projects': [project.to_dict() for project in projects],
@@ -93,10 +86,10 @@ def list_projects(current_user):
             'filters': {
                 'active_only': active_only,
                 'project_type': project_type,
-                'language': language
-            }
+                'language': language,
+            },
         }), 200
-        
+
     except Exception as e:
         logger.exception("List projects error")
         capture_exception(e, {'route': 'project.list_projects', 'user_id': current_user.id})
@@ -109,18 +102,14 @@ def get_project(current_user, project_id):
     """Get a specific project by ID"""
     try:
         project = ProjectMetadata.query.filter_by(
-            id=project_id, 
-            user_id=current_user.id
+            id=project_id, user_id=current_user.id
         ).first()
-        
+
         if not project:
             return jsonify({'success': False, 'error': 'Project not found'}), 404
-        
-        return jsonify({
-            'success': True,
-            'project': project.to_dict(include_path=True)
-        }), 200
-        
+
+        return jsonify({'success': True, 'project': project.to_dict(include_path=True)}), 200
+
     except Exception as e:
         logger.exception("Get project error")
         capture_exception(e, {'route': 'project.get_project', 'user_id': current_user.id, 'project_id': project_id})
@@ -133,43 +122,37 @@ def update_project(current_user, project_id):
     """Update a project"""
     try:
         data = request.get_json()
-        
         if not data:
             return jsonify({'success': False, 'error': 'No data provided'}), 400
-        
-        # Sanitize inputs
+
         update_data = {}
-        
-        if 'project_name' in data:
-            update_data['project_name'] = sanitize_input(data['project_name'], 255)
-            
-        if 'description' in data:
-            update_data['description'] = sanitize_input(data['description'], 1000) or None
-            
-        if 'project_type' in data:
-            update_data['project_type'] = sanitize_input(data['project_type'], 50) or None
-            
-        if 'language' in data:
-            update_data['language'] = sanitize_input(data['language'], 50) or None
-            
-        if 'framework' in data:
-            update_data['framework'] = sanitize_input(data['framework'], 100) or None
-            
-        if 'project_path' in data:
-            update_data['project_path'] = sanitize_input(data['project_path'], 500) or None
-        
+        field_limits = {
+            'project_name': 255,
+            'description': 1000,
+            'project_type': 50,
+            'language': 50,
+            'framework': 100,
+            'project_path': 500,
+        }
+        for field, limit in field_limits.items():
+            if field in data:
+                update_data[field] = sanitize_input(data[field], limit) or None
+
         if not update_data:
             return jsonify({'success': False, 'error': 'No valid fields to update'}), 400
-        
-        # Update project
+
         project = update_project_metadata(current_user.id, project_id, **update_data)
-        
+
+        # Invalidate context cache for this project if path is changing
+        if 'project_path' in update_data and update_data['project_path']:
+            invalidate_cache(update_data['project_path'])
+
         return jsonify({
             'success': True,
             'message': 'Project updated successfully',
-            'project': project.to_dict()
+            'project': project.to_dict(),
         }), 200
-        
+
     except ValueError as e:
         return jsonify({'success': False, 'error': str(e)}), 400
     except Exception as e:
@@ -184,22 +167,15 @@ def update_project_access(current_user, project_id):
     """Update project last accessed time"""
     try:
         project = ProjectMetadata.query.filter_by(
-            id=project_id, 
-            user_id=current_user.id,
-            is_active=True
+            id=project_id, user_id=current_user.id, is_active=True
         ).first()
-        
+
         if not project:
             return jsonify({'success': False, 'error': 'Project not found'}), 404
-        
+
         project.update_last_accessed()
-        
-        return jsonify({
-            'success': True,
-            'message': 'Project access updated',
-            'project': project.to_dict()
-        }), 200
-        
+        return jsonify({'success': True, 'message': 'Project access updated', 'project': project.to_dict()}), 200
+
     except Exception as e:
         logger.exception("Update project access error")
         capture_exception(e, {'route': 'project.update_project_access', 'user_id': current_user.id, 'project_id': project_id})
@@ -212,22 +188,15 @@ def deactivate_project(current_user, project_id):
     """Deactivate a project (soft delete)"""
     try:
         project = ProjectMetadata.query.filter_by(
-            id=project_id, 
-            user_id=current_user.id,
-            is_active=True
+            id=project_id, user_id=current_user.id, is_active=True
         ).first()
-        
+
         if not project:
             return jsonify({'success': False, 'error': 'Project not found'}), 404
-        
+
         project.deactivate()
-        
-        return jsonify({
-            'success': True,
-            'message': 'Project deactivated successfully',
-            'project': project.to_dict()
-        }), 200
-        
+        return jsonify({'success': True, 'message': 'Project deactivated successfully', 'project': project.to_dict()}), 200
+
     except Exception as e:
         logger.exception("Deactivate project error")
         capture_exception(e, {'route': 'project.deactivate_project', 'user_id': current_user.id, 'project_id': project_id})
@@ -240,15 +209,10 @@ def get_project_by_name(current_user, project_name):
     """Get a project by name"""
     try:
         project = ProjectMetadata.get_project_by_name(current_user.id, project_name)
-        
         if not project:
             return jsonify({'success': False, 'error': 'Project not found'}), 404
-        
-        return jsonify({
-            'success': True,
-            'project': project.to_dict(include_path=True)
-        }), 200
-        
+        return jsonify({'success': True, 'project': project.to_dict(include_path=True)}), 200
+
     except Exception as e:
         logger.exception("Get project by name error")
         capture_exception(e, {'route': 'project.get_project_by_name', 'user_id': current_user.id})
@@ -260,35 +224,172 @@ def get_project_by_name(current_user, project_name):
 def get_project_types(current_user):
     """Get available project types for the user"""
     try:
-        # Get unique project types for the user
         project_types = db.session.query(ProjectMetadata.project_type)\
-                                  .filter_by(user_id=current_user.id, is_active=True)\
-                                  .distinct().all()
-        
-        types_list = [pt[0] for pt in project_types if pt[0]]
-        
-        # Get unique languages
+            .filter_by(user_id=current_user.id, is_active=True).distinct().all()
         languages = db.session.query(ProjectMetadata.language)\
-                              .filter_by(user_id=current_user.id, is_active=True)\
-                              .distinct().all()
-        
-        languages_list = [lang[0] for lang in languages if lang[0]]
-        
-        # Get unique frameworks
+            .filter_by(user_id=current_user.id, is_active=True).distinct().all()
         frameworks = db.session.query(ProjectMetadata.framework)\
-                               .filter_by(user_id=current_user.id, is_active=True)\
-                               .distinct().all()
-        
-        frameworks_list = [fw[0] for fw in frameworks if fw[0]]
-        
+            .filter_by(user_id=current_user.id, is_active=True).distinct().all()
+
         return jsonify({
             'success': True,
-            'project_types': types_list,
-            'languages': languages_list,
-            'frameworks': frameworks_list
+            'project_types': [pt[0] for pt in project_types if pt[0]],
+            'languages': [lang[0] for lang in languages if lang[0]],
+            'frameworks': [fw[0] for fw in frameworks if fw[0]],
         }), 200
-        
+
     except Exception as e:
         logger.exception("Get project types error")
         capture_exception(e, {'route': 'project.get_project_types', 'user_id': current_user.id})
         return jsonify({'success': False, 'error': 'An error occurred while retrieving project types'}), 500
+
+
+# ── NEW: Context endpoint ─────────────────────────────────────────────────────
+
+@project_bp.route('/<int:project_id>/context', methods=['POST'])
+@token_required
+def get_project_context(current_user, project_id):
+    """
+    Pre-fetch and return project context for the frontend.
+
+    The IDE calls this whenever the active file changes so it can attach the
+    serialised context_payload to subsequent agent requests without waiting
+    for the agent to do its own file exploration.
+
+    Expected JSON body:
+    {
+        "current_file_path": "/abs/path/to/file.rs",   // required
+        "recently_modified": ["/path/a.rs", "/path/b.rs"],  // optional
+        "force_refresh": false                           // optional
+    }
+
+    Returns:
+    {
+        "success": true,
+        "context_payload": { ... },   // pass this verbatim to the agent
+        "summary": {
+            "current_file": "src/lib.rs",
+            "related_files": ["src/contract.rs"],
+            "total_chars": 4321,
+            "cache_hit": false
+        }
+    }
+    """
+    try:
+        project = ProjectMetadata.query.filter_by(
+            id=project_id, user_id=current_user.id, is_active=True
+        ).first()
+
+        if not project:
+            return jsonify({'success': False, 'error': 'Project not found'}), 404
+
+        if not project.project_path:
+            return jsonify({'success': False, 'error': 'Project has no path configured'}), 400
+
+        data = request.get_json() or {}
+        current_file_path = data.get('current_file_path')
+        recently_modified = data.get('recently_modified', [])
+        force_refresh = bool(data.get('force_refresh', False))
+
+        # Validate current_file_path is within the project to prevent path traversal
+        if current_file_path:
+            import os
+            abs_project = os.path.realpath(project.project_path)
+            abs_file = os.path.realpath(current_file_path)
+            if not abs_file.startswith(abs_project):
+                return jsonify({'success': False, 'error': 'File path is outside project directory'}), 400
+
+        project_metadata = {
+            'project_name': project.project_name,
+            'project_type': project.project_type or '',
+            'language': project.language or '',
+            'framework': project.framework or '',
+        }
+
+        ctx = build_project_context(
+            project_path=project.project_path,
+            current_file_path=current_file_path,
+            project_metadata=project_metadata,
+            recently_modified=recently_modified,
+            force_refresh=force_refresh,
+        )
+
+        # Build the payload the frontend will forward to the agent
+        context_payload = {
+            'project_path': project.project_path,
+            'current_file_path': current_file_path,
+            'project_metadata': project_metadata,
+            'recently_modified': recently_modified,
+        }
+
+        summary = {
+            'current_file': (
+                _relative_path(ctx.current_file.path, project.project_path)
+                if ctx.current_file else None
+            ),
+            'related_files': [
+                _relative_path(rf.path, project.project_path)
+                for rf in ctx.related_files
+            ],
+            'total_chars': ctx.total_chars,
+            'cache_hit': ctx.cache_hit,
+            'project_type': ctx.project_type,
+            'language': ctx.language,
+        }
+
+        return jsonify({
+            'success': True,
+            'context_payload': context_payload,
+            'summary': summary,
+        }), 200
+
+    except Exception as e:
+        logger.exception("Get project context error")
+        capture_exception(e, {
+            'route': 'project.get_project_context',
+            'user_id': current_user.id,
+            'project_id': project_id,
+        })
+        return jsonify({'success': False, 'error': 'An error occurred while building project context'}), 500
+
+
+@project_bp.route('/<int:project_id>/context/invalidate', methods=['POST'])
+@token_required
+def invalidate_project_context(current_user, project_id):
+    """
+    Invalidate the context cache for a project.
+
+    Call this from the frontend whenever a file is saved or created so the
+    next context fetch picks up the changes.
+    """
+    try:
+        project = ProjectMetadata.query.filter_by(
+            id=project_id, user_id=current_user.id, is_active=True
+        ).first()
+
+        if not project:
+            return jsonify({'success': False, 'error': 'Project not found'}), 404
+
+        if project.project_path:
+            invalidate_cache(project.project_path)
+
+        return jsonify({'success': True, 'message': 'Context cache invalidated'}), 200
+
+    except Exception as e:
+        logger.exception("Invalidate context error")
+        capture_exception(e, {
+            'route': 'project.invalidate_project_context',
+            'user_id': current_user.id,
+            'project_id': project_id,
+        })
+        return jsonify({'success': False, 'error': 'An error occurred while invalidating context'}), 500
+
+
+# ── Helper ────────────────────────────────────────────────────────────────────
+
+def _relative_path(absolute: str, base: str) -> str:
+    import os
+    try:
+        return os.path.relpath(absolute, base)
+    except ValueError:
+        return absolute
