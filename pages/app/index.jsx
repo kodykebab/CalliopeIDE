@@ -2,26 +2,17 @@
 
 import { useState, useEffect } from "react"
 import { motion, AnimatePresence } from "framer-motion"
-import { 
-    Menu, 
-    X, 
-    FolderOpen, 
-    Settings, 
-    Play, 
-    Save, 
-    Download,
-    MessageSquare,
-    Send,
-    ChevronLeft,
-    ChevronRight
-} from "lucide-react"
+import { Menu, X, FolderOpen, Settings, Play, Save, Download, MessageSquare, Send, ChevronLeft, ChevronRight, Rocket } from "lucide-react"
 import { Button } from "@/components/ui/button"
+import { getPublicKey, signTransaction, isConnected } from "@stellar/freighter-api"
 
 export default function IDEApp() {
     const [sidebarOpen, setSidebarOpen] = useState(true)
     const [chatOpen, setChatOpen] = useState(true)
     const [message, setMessage] = useState("")
     const [isMobile, setIsMobile] = useState(false)
+    const [isDeploying, setIsDeploying] = useState(false)
+    const [contractId, setContractId] = useState(null)
 
     // Check if we're on mobile
     useEffect(() => {
@@ -42,6 +33,80 @@ export default function IDEApp() {
         window.addEventListener("resize", checkMobile)
         return () => window.removeEventListener("resize", checkMobile)
     }, [])
+
+    const handleDeploy = async () => {
+        try {
+            setIsDeploying(true);
+            const connected = await isConnected();
+            if (!connected) {
+                alert("Please install and unlock Freighter extension.");
+                return;
+            }
+
+            const publicKey = await getPublicKey();
+            if (!publicKey) return;
+
+            // 1. Prepare Upload
+            const uploadPrep = await fetch("/api/soroban/prepare-upload", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                    session_id: 1, // Mock session ID for now
+                    wasm_path: "target/wasm32-unknown-unknown/release/contract.wasm", 
+                    public_key: publicKey
+                })
+            }).then(r => r.json());
+
+            if (!uploadPrep.success) throw new Error(uploadPrep.error);
+
+            // 2. Sign Upload
+            const signedUpload = await signTransaction(uploadPrep.unsigned_xdr, { network: "TESTNET" });
+            
+            // 3. Submit Upload
+            const uploadResult = await fetch("/api/soroban/submit-tx", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ signed_xdr: signedUpload })
+            }).then(r => r.json());
+
+            if (!uploadResult.success) throw new Error(uploadResult.error);
+            const wasmHash = uploadResult.wasm_hash;
+
+            // 4. Prepare Create
+            const createPrep = await fetch("/api/soroban/prepare-create", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                    session_id: 1,
+                    wasm_hash: wasmHash,
+                    public_key: publicKey
+                })
+            }).then(r => r.json());
+
+            if (!createPrep.success) throw new Error(createPrep.error);
+
+            // 5. Sign Create
+            const signedCreate = await signTransaction(createPrep.unsigned_xdr, { network: "TESTNET" });
+
+            // 6. Submit Create
+            const createResult = await fetch("/api/soroban/submit-tx", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ signed_xdr: signedCreate })
+            }).then(r => r.json());
+
+            if (!createResult.success) throw new Error(createResult.error);
+            
+            setContractId(createResult.contract_id);
+            alert(`Contract deployed successfully! ID: ${createResult.contract_id}`);
+
+        } catch (error) {
+            console.error("Deployment failed:", error);
+            alert(`Deployment failed: ${error.message}`);
+        } finally {
+            setIsDeploying(false);
+        }
+    };
 
     const sidebarVariants = {
         open: { x: 0, opacity: 1 },
@@ -176,6 +241,16 @@ export default function IDEApp() {
                         >
                             <Play className="w-4 h-4 mr-1" />
                             Run
+                        </Button>
+                        <Button
+                            variant="ghost"
+                            size="sm"
+                            onClick={handleDeploy}
+                            disabled={isDeploying}
+                            className={`hidden sm:flex p-1 h-auto ${isDeploying ? "text-blue-500 animate-pulse" : "text-gray-400 hover:text-white"}`}
+                        >
+                            <Rocket className="w-4 h-4 mr-1" />
+                            {isDeploying ? "Deploying..." : "Deploy"}
                         </Button>
                         <Button
                             variant="ghost"
