@@ -7,38 +7,66 @@
   html {
     /* Prevent horizontal scrolling on mobile */
     overflow-x: hidden;
+    /* Use dynamic viewport height so panels fill screen correctly on mobile browsers */
+    height: 100%;
   }
-  
+
   body {
+    height: 100%;
     /* Improve touch scrolling on iOS */
     -webkit-overflow-scrolling: touch;
     /* Prevent zoom on input focus on mobile */
     -webkit-text-size-adjust: 100%;
   }
-  
-  /* Ensure minimum touch target size for accessibility */
+
+  /* Ensure minimum touch target size for accessibility (44 × 44 px) */
   button, [role="button"], input[type="submit"], input[type="button"] {
     min-height: 44px;
     min-width: 44px;
   }
-  
-  /* Better mobile input handling */
+
+  /* Better mobile input handling — prevents Safari from zooming */
   input, textarea, select {
-    /* Prevent zoom on input focus on mobile Safari */
     font-size: 16px;
   }
-  
+
   @media (max-width: 767px) {
-    /* Reduce font sizes slightly on mobile for better content fit */
+    /* Scale headings fluidly on small screens */
     h1 { font-size: clamp(1.875rem, 8vw, 3rem); }
     h2 { font-size: clamp(1.5rem, 6vw, 2.25rem); }
     h3 { font-size: clamp(1.25rem, 5vw, 1.875rem); }
-    
-    /* Ensure proper spacing on mobile */
+
+    /* Ensure proper horizontal padding on mobile */
     .container {
       padding-left: 1rem;
       padding-right: 1rem;
     }
+  }
+}
+
+/* ── IDE-specific responsive helpers ─────────────────────────── */
+@layer utilities {
+  /* Collapsed sidebar / chat panel: hide overflow so content never bleeds */
+  .panel-collapsed {
+    width: 0;
+    overflow: hidden;
+  }
+
+  /* Make the IDE shell respect mobile browser chrome (address bar, nav bar) */
+  .ide-shell {
+    height: 100dvh; /* dynamic viewport height — fallback to h-screen in JSX */
+  }
+
+  /* Gutter (line-number column) stays sticky while code scrolls horizontally */
+  .editor-gutter {
+    position: sticky;
+    left: 0;
+    z-index: 1;
+  }
+
+  /* Safe bottom padding for mobile virtual keyboard */
+  .safe-bottom {
+    padding-bottom: env(safe-area-inset-bottom, 0px);
   }
 }
 

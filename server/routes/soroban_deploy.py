@@ -305,28 +305,211 @@ def _extract_contract_id(tx_result) -> str | None:
     return None
 
 
+@soroban_deploy_bp.route("/wasm/<int:session_id>", methods=["GET"])
+@token_required
+def download_wasm(current_user, session_id):
+    """
+    Download a compiled WASM file from a session workspace.
+    
+    Query params:
+        path (str) - relative path to .wasm file
+    """
+    try:
+        wasm_path_raw = request.args.get("path")
+        if not wasm_path_raw:
+            return jsonify({"success": False, "error": "path is required"}), 400
+
+        session = Session.query.filter_by(
+            id=session_id, user_id=current_user.id, is_active=True
+        ).first()
+        if not session:
+            return jsonify({"success": False, "error": "Session not found"}), 404
+
+        instance_dir = session.instance_dir
+        wasm_path = _resolve_wasm_path(wasm_path_raw, instance_dir)
+        if not wasm_path or not os.path.isfile(wasm_path):
+            return jsonify({"success": False, "error": "WASM file not found"}), 404
+
+        from flask import send_file
+        return send_file(wasm_path, mimetype="application/wasm")
+
+    except Exception as e:
+        logger.exception("Download WASM error")
+        return jsonify({"success": False, "error": str(e)}), 500
+
+
+@soroban_deploy_bp.route("/prepare-upload", methods=["POST"])
+@token_required
+def prepare_upload(current_user):
+    """
+    Build an unsigned transaction to upload contract WASM.
+    
+    Request JSON:
+        session_id    (int)
+        wasm_path     (str)
+        public_key    (str) - User's Freighter public key
+    """
+    try:
+        data = request.get_json()
+        session_id = data.get("session_id")
+        wasm_path_raw = data.get("wasm_path")
+        public_key = data.get("public_key")
+        
+        if not all([session_id, wasm_path_raw, public_key]):
+            return jsonify({"success": False, "error": "session_id, wasm_path, and public_key are required"}), 400
+
+        session = Session.query.filter_by(id=session_id, user_id=current_user.id, is_active=True).first()
+        if not session:
+            return jsonify({"success": False, "error": "Session not found"}), 404
+
+        instance_dir = session.instance_dir
+        wasm_path = _resolve_wasm_path(wasm_path_raw, instance_dir)
+        if not wasm_path or not os.path.isfile(wasm_path):
+            return jsonify({"success": False, "error": "WASM file not found"}), 404
+
+        sdk_ok, sdk_err = _get_stellar_sdk()
+        if not sdk_ok:
+            return jsonify({"success": False, "error": sdk_err}), 500
+
+        from stellar_sdk import SorobanServer, TransactionBuilder, Network
+        server = SorobanServer(STELLAR_TESTNET_RPC)
+        source_account = server.load_account(public_key)
+        
+        with open(wasm_path, "rb") as f:
+            wasm_bytes = f.read()
+
+        tx = (
+            TransactionBuilder(
+                source_account=source_account,
+                network_passphrase=STELLAR_TESTNET_NETWORK_PASSPHRASE,
+                base_fee=100,
+            )
+            .set_timeout(60)
+            .append_upload_contract_wasm_op(wasm=wasm_bytes)
+            .build()
+        )
+        
+        tx = server.prepare_transaction(tx)
+        
+        return jsonify({
+            "success": True,
+            "unsigned_xdr": tx.to_xdr(),
+            "network": "testnet"
+        }), 200
+
+    except Exception as e:
+        logger.exception("Prepare upload error")
+        return jsonify({"success": False, "error": str(e)}), 500
+
+
+@soroban_deploy_bp.route("/prepare-create", methods=["POST"])
+@token_required
+def prepare_create(current_user):
+    """
+    Build an unsigned transaction to create a contract instance.
+    """
+    try:
+        data = request.get_json()
+        session_id = data.get("session_id")
+        wasm_hash = data.get("wasm_hash")
+        public_key = data.get("public_key")
+        
+        if not all([session_id, wasm_hash, public_key]):
+            return jsonify({"success": False, "error": "session_id, wasm_hash, and public_key are required"}), 400
+
+        sdk_ok, sdk_err = _get_stellar_sdk()
+        if not sdk_ok:
+            return jsonify({"success": False, "error": sdk_err}), 500
+
+        from stellar_sdk import SorobanServer, TransactionBuilder
+        server = SorobanServer(STELLAR_TESTNET_RPC)
+        source_account = server.load_account(public_key)
+
+        tx = (
+            TransactionBuilder(
+                source_account=source_account,
+                network_passphrase=STELLAR_TESTNET_NETWORK_PASSPHRASE,
+                base_fee=100,
+            )
+            .set_timeout(60)
+            .append_create_contract_op(wasm_hash=wasm_hash, address=public_key)
+            .build()
+        )
+        
+        tx = server.prepare_transaction(tx)
+        
+        return jsonify({
+            "success": True,
+            "unsigned_xdr": tx.to_xdr(),
+            "network": "testnet"
+        }), 200
+
+    except Exception as e:
+        logger.exception("Prepare create error")
+        return jsonify({"success": False, "error": str(e)}), 500
+
+
+@soroban_deploy_bp.route("/submit-tx", methods=["POST"])
+@token_required
+def submit_signed_tx(current_user):
+    """
+    Submit a signed transaction XDR to the network.
+    """
+    try:
+        data = request.get_json()
+        signed_xdr = data.get("signed_xdr")
+        
+        if not signed_xdr:
+            return jsonify({"success": False, "error": "signed_xdr is required"}), 400
+
+        sdk_ok, sdk_err = _get_stellar_sdk()
+        if not sdk_ok:
+            return jsonify({"success": False, "error": sdk_err}), 500
+
+        from stellar_sdk import SorobanServer, TransactionEnvelope
+        server = SorobanServer(STELLAR_TESTNET_RPC)
+        
+        # We need to know the result to extract wasm_hash or contract_id
+        envelope = TransactionEnvelope.from_xdr(signed_xdr, STELLAR_TESTNET_NETWORK_PASSPHRASE)
+        submit_response = server.send_transaction(envelope)
+        
+        result = _wait_for_transaction(server, submit_response.hash)
+        if not result["success"]:
+            return jsonify({
+                "success": False, 
+                "error": result["error"],
+                "transaction_hash": submit_response.hash
+            }), 422
+
+        return jsonify({
+            "success": True,
+            "transaction_hash": submit_response.hash,
+            "wasm_hash": result.get("wasm_hash"),
+            "contract_id": result.get("contract_id")
+        }), 200
+
+    except Exception as e:
+        logger.exception("Submit transaction error")
+        return jsonify({"success": False, "error": str(e)}), 500
+
+
 @soroban_deploy_bp.route("/deployments/<int:session_id>", methods=["GET"])
 @token_required
 def list_deployments(current_user, session_id):
     """
     List deployment records stored in the session workspace.
-
-    Response JSON:
-        success      (bool)
-        deployments  (list[dict])
     """
     try:
         session = Session.query.filter_by(
             id=session_id, user_id=current_user.id, is_active=True
         ).first()
         if not session:
-            return jsonify({"success": False, "error": "Session not found or access denied"}), 404
+            return jsonify({"success": False, "error": "Session not found"}), 404
 
         instance_dir = session.instance_dir
         if not instance_dir or not os.path.isdir(instance_dir):
             return jsonify({"success": True, "deployments": [], "total": 0}), 200
 
-        # Read deployment records from .deployments/ directory
         deploy_dir = os.path.join(instance_dir, ".deployments")
         deployments = []
         if os.path.isdir(deploy_dir):
@@ -345,9 +528,4 @@ def list_deployments(current_user, session_id):
 
     except Exception as e:
         logger.exception("List deployments error")
-        capture_exception(e, {
-            "route": "soroban_deploy.list_deployments",
-            "user_id": current_user.id,
-            "session_id": session_id,
-        })
-        return jsonify({"success": False, "error": "An error occurred while listing deployments"}), 500
+        return jsonify({"success": False, "error": "Internal error"}), 500

@@ -21,6 +21,7 @@ from server.routes.soroban_routes import soroban_bp
 from server.routes.project_routes import project_bp
 from server.routes.soroban_deploy import soroban_deploy_bp
 from server.routes.soroban_invoke import soroban_invoke_bp
+from server.routes.soroban_wallet import wallet_bp
 from server.utils import token_required, secure_execute, SecurityError
 from server.utils.db_utils import create_session_for_user, add_chat_message, ensure_database_directory, get_database_stats
 from server.utils.monitoring import setup_logging, init_sentry, monitor_endpoint, get_monitoring_stats
@@ -82,6 +83,7 @@ app.register_blueprint(project_bp)
 app.register_blueprint(soroban_bp)
 app.register_blueprint(soroban_deploy_bp)
 app.register_blueprint(soroban_invoke_bp)
+app.register_blueprint(wallet_bp)
 
 if LIMITER_AVAILABLE and os.getenv('RATE_LIMIT_ENABLED', 'true').lower() == 'true':
     limiter = Limiter(
