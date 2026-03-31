@@ -16,25 +16,39 @@ import { apiRequest } from "@/lib/api-client"
 import { captureException } from "@/lib/monitoring"
 import { cn } from "@/lib/utils"
 
+// ─── Auth helpers ─────────────────────────────────────────────────────────────
+// Checks localStorage for a token to decide whether the user is already
+// signed in, so we can send them straight to /app instead of /login.
+function isLoggedIn() {
+    if (typeof window === "undefined") return false
+    return !!localStorage.getItem("access_token")
+}
+
 export default function Home() {
     const [scrolled, setScrolled] = useState(false)
     const [projectPrompt, setProjectPrompt] = useState("")
     const [isGenerating, setIsGenerating] = useState(false)
     const [generateError, setGenerateError] = useState("")
+    const [authed, setAuthed] = useState(false)  // true once we know user is logged in
     const heroRef = useRef(null)
     const featuresRef = useRef(null)
     const { scrollYProgress } = useScroll()
     const opacity = useTransform(scrollYProgress, [0, 0.2], [1, 0])
     const y = useTransform(scrollYProgress, [0, 0.2], [0, -50])
 
+    // Check auth state on mount (client-only)
     useEffect(() => {
-        const handleScroll = () => {
-            setScrolled(window.scrollY > 20)
-        }
+        setAuthed(isLoggedIn())
+    }, [])
 
+    useEffect(() => {
+        const handleScroll = () => setScrolled(window.scrollY > 20)
         window.addEventListener("scroll", handleScroll)
         return () => window.removeEventListener("scroll", handleScroll)
     }, [])
+
+    // Where CTAs point: logged-in users go straight to /app; guests go to /login
+    const ctaHref = authed ? "/app" : "/login"
 
     const handleProjectGeneration = async (event) => {
         event.preventDefault()
@@ -49,9 +63,7 @@ export default function Home() {
         try {
             await apiRequest("/api/generate", {
                 method: "POST",
-                headers: {
-                    "Content-Type": "application/json",
-                },
+                headers: { "Content-Type": "application/json" },
                 body: JSON.stringify({ prompt: projectPrompt.trim() }),
             }, {
                 friendlyErrorMessage: "Project generation is currently unavailable. Please try again shortly.",
@@ -73,6 +85,7 @@ export default function Home() {
         <div data-testid="home-shell" className="flex flex-col min-h-screen bg-background text-foreground overflow-hidden transition-colors duration-300">
             <GradientBackground />
 
+            {/* ── Header ──────────────────────────────────────────────────── */}
             <header
                 className={cn(
                     "fixed top-0 left-0 right-0 z-50 transition-all duration-300",
@@ -91,10 +104,10 @@ export default function Home() {
 
                     <nav className="hidden md:flex gap-6 lg:gap-10">
                         {[
-                            { name: "Features", href: "#features" },
+                            { name: "Features",      href: "#features" },
                             { name: "Documentation", href: "#docs" },
-                            { name: "Examples", href: "#examples" },
-                            { name: "Pricing", href: "/pricing" }
+                            { name: "Examples",      href: "#examples" },
+                            { name: "Pricing",       href: "/pricing" },
                         ].map((item, i) => (
                             <motion.div
                                 key={item.name}
@@ -115,22 +128,45 @@ export default function Home() {
                         transition={{ duration: 0.5, delay: 0.4 }}
                         className="flex items-center gap-2 sm:gap-4"
                     >
-                        <Link href="https://github.com/aludyalu/chatterji" target="_blank" className="text-foreground/70 hover:text-emerald-600 dark:hover:text-[#9FEF00] transition-colors">
+                        <Link href="https://github.com/kentuckyfriedcode/CalliopeIDE" target="_blank" className="text-foreground/70 hover:text-emerald-600 dark:hover:text-[#9FEF00] transition-colors">
                             <Github className="size-5" />
                             <span className="sr-only">GitHub</span>
                         </Link>
                         <ThemeToggle />
-                        <Link href="/app">
-                            <Button className="h-8 sm:h-10 px-3 sm:px-4 text-sm bg-[#9FEF00] text-black hover:bg-[#9FEF00]/80 transition-colors">
-                                <span className="hidden sm:inline">Get Started</span>
-                                <span className="sm:hidden">Start</span>
-                            </Button>
-                        </Link>
+
+                        {authed ? (
+                            /* Already signed in → go straight to the IDE */
+                            <Link href="/app">
+                                <Button className="h-8 sm:h-10 px-3 sm:px-4 text-sm bg-[#9FEF00] text-black hover:bg-[#9FEF00]/80 transition-colors">
+                                    <span className="hidden sm:inline">Open IDE</span>
+                                    <span className="sm:hidden">IDE</span>
+                                </Button>
+                            </Link>
+                        ) : (
+                            /* Guest → show Sign In + Get Started */
+                            <div className="flex items-center gap-2">
+                                <Link href="/login">
+                                    <Button
+                                        variant="ghost"
+                                        className="h-8 sm:h-10 px-3 sm:px-4 text-sm text-foreground/70 hover:text-foreground transition-colors"
+                                    >
+                                        Sign in
+                                    </Button>
+                                </Link>
+                                <Link href="/login">
+                                    <Button className="h-8 sm:h-10 px-3 sm:px-4 text-sm bg-[#9FEF00] text-black hover:bg-[#9FEF00]/80 transition-colors">
+                                        <span className="hidden sm:inline">Get Started</span>
+                                        <span className="sm:hidden">Start</span>
+                                    </Button>
+                                </Link>
+                            </div>
+                        )}
                     </motion.div>
                 </div>
             </header>
 
             <main className="flex-1">
+                {/* ── Hero ────────────────────────────────────────────────── */}
                 <section className="relative pt-20 pb-12 sm:pt-32 sm:pb-20 md:pt-40 md:pb-32" ref={heroRef}>
                     <div className="mx-auto px-4 sm:px-6 lg:px-8 w-full relative z-10">
                         <div className="max-w-4xl mx-auto text-center space-y-6 sm:space-y-8">
@@ -167,7 +203,8 @@ export default function Home() {
                                 transition={{ duration: 0.5, delay: 0.4 }}
                                 className="flex flex-wrap gap-4 justify-center mt-8"
                             >
-                                <Link href="/app">
+                                {/* ↓ ctaHref routes guests to /login, signed-in users to /app */}
+                                <Link href={ctaHref}>
                                     <Button className="h-12 px-8 bg-[#9FEF00] text-black hover:bg-[#9FEF00]/80 transition-colors">
                                         Start Building
                                     </Button>
@@ -196,6 +233,7 @@ export default function Home() {
                     </div>
                 </section>
 
+                {/* ── Logo Cloud ──────────────────────────────────────────── */}
                 <section className="border-t border-border/70 py-16 relative overflow-hidden">
                     <div className="mx-auto px-8 w-full">
                         <div className="text-center mb-10">
@@ -207,6 +245,7 @@ export default function Home() {
                     </div>
                 </section>
 
+                {/* ── Features ────────────────────────────────────────────── */}
                 <section className="py-24 relative" id="features" ref={featuresRef}>
                     <div className="mx-auto px-8 w-full relative z-10">
                         <div className="text-center max-w-3xl mx-auto mb-20">
@@ -260,9 +299,7 @@ export default function Home() {
                                             "✓ test_authorization (2.5ms)",
                                             "✓ test_error_handling (1.9ms)",
                                         ].map((line, i) => (
-                                            <div key={i} className="text-emerald-600 dark:text-[#9FEF00]">
-                                                {line}
-                                            </div>
+                                            <div key={i} className="text-emerald-600 dark:text-[#9FEF00]">{line}</div>
                                         ))}
                                         <div className="mt-4 pt-2 border-t border-border/70 text-foreground/70">5 tests passed (11.6ms)</div>
                                     </div>
@@ -288,7 +325,7 @@ export default function Home() {
                                                 transition={{ duration: 2, ease: "easeInOut" }}
                                                 viewport={{ once: true }}
                                                 className="h-full bg-gradient-to-r from-[#9FEF00]/70 to-[#9FEF00]"
-                                            ></motion.div>
+                                            />
                                         </div>
                                         <div className="flex justify-between text-xs text-foreground/50">
                                             <span>Compiling</span>
@@ -297,7 +334,7 @@ export default function Home() {
                                             <span>Verifying</span>
                                         </div>
                                         <div className="mt-4 pt-4 border-t border-border/70">
-                                            <Link href="/app">
+                                            <Link href={ctaHref}>
                                                 <Button className="w-full bg-[#9FEF00] text-black hover:bg-[#9FEF00]/80">
                                                     Deploy to Mainnet
                                                 </Button>
@@ -316,30 +353,28 @@ export default function Home() {
                                 <div className="theme-panel rounded-lg border p-4 h-full">
                                     <div className="space-y-3">
                                         <div className="flex items-center gap-2">
-                                            <div className="size-6 rounded-full bg-[#9FEF00]/80 flex items-center justify-center text-xs font-medium text-black">
-                                                JD
-                                            </div>
-                                            <div className="size-6 rounded-full bg-[#9FEF00]/60 flex items-center justify-center text-xs font-medium text-black">
-                                                KL
-                                            </div>
-                                            <div className="size-6 rounded-full bg-[#9FEF00]/40 flex items-center justify-center text-xs font-medium text-black">
-                                                MN
-                                            </div>
+                                            {["JD", "KL", "MN"].map((initials, i) => (
+                                                <div
+                                                    key={initials}
+                                                    className="size-6 rounded-full flex items-center justify-center text-xs font-medium text-black"
+                                                    style={{ background: `rgba(159,239,0,${0.8 - i * 0.2})` }}
+                                                >
+                                                    {initials}
+                                                </div>
+                                            ))}
                                             <div className="text-xs text-foreground/70 ml-2">3 collaborators online</div>
                                         </div>
                                         <div className="theme-editor-surface rounded border p-3 text-xs font-mono">
                                             <div className="text-emerald-700 dark:text-[#9FEF00]">// Added by Jane Doe - 2 minutes ago</div>
                                             <div className="text-foreground mt-1">function transfer(to: Address, amount: u128) {"{"}</div>
-                                            <div className="text-foreground ml-4">
-                                                if (amount {">"}this.balance) {"{"}
-                                            </div>
+                                            <div className="text-foreground ml-4">if (amount {">"} this.balance) {"{"}</div>
                                             <div className="text-foreground ml-8">throw new Error("Insufficient balance");</div>
                                             <div className="text-foreground ml-4">{"}"}</div>
                                             <div className="text-foreground">{"}"}</div>
                                         </div>
                                         <div className="flex justify-between items-center mt-2">
                                             <div className="text-xs text-foreground/50">Last edit 2m ago</div>
-                                            <Link href="/app">
+                                            <Link href={ctaHref}>
                                                 <Button
                                                     variant="outline"
                                                     size="sm"
@@ -356,10 +391,9 @@ export default function Home() {
                     </div>
                 </section>
 
-                {/* Get Started Section */}
+                {/* ── Get Started ─────────────────────────────────────────── */}
                 <section className="py-24 relative overflow-hidden">
-                    <div className="absolute inset-0 bg-background opacity-50"></div>
-
+                    <div className="absolute inset-0 bg-background opacity-50" />
                     <div className="mx-auto px-8 w-full relative z-10">
                         <div className="max-w-3xl mx-auto text-center">
                             <motion.h2
@@ -388,7 +422,7 @@ export default function Home() {
                                 transition={{ duration: 0.5, delay: 0.2 }}
                                 className="relative"
                             >
-                                <div className="absolute -inset-px theme-cta-overlay rounded-xl opacity-50 blur-sm"></div>
+                                <div className="absolute -inset-px theme-cta-overlay rounded-xl opacity-50 blur-sm" />
                                 <div data-testid="chat-surface" className="theme-panel relative rounded-xl border backdrop-blur-sm shadow-2xl overflow-hidden">
                                     <div className="p-6 relative">
                                         <form onSubmit={handleProjectGeneration}>
@@ -397,10 +431,10 @@ export default function Home() {
                                                 placeholder="Describe your Soroban smart contract idea or project requirements..."
                                                 name="prompt"
                                                 value={projectPrompt}
-                                                onChange={(event) => setProjectPrompt(event.target.value)}
+                                                onChange={(e) => setProjectPrompt(e.target.value)}
                                                 disabled={isGenerating}
                                                 required
-                                            ></textarea>
+                                            />
                                             {generateError && (
                                                 <p className="mt-3 text-sm text-red-500" role="alert" aria-live="polite">
                                                     {generateError}
@@ -424,6 +458,7 @@ export default function Home() {
                     </div>
                 </section>
 
+                {/* ── Testimonials ────────────────────────────────────────── */}
                 <section className="py-24 relative">
                     <div className="mx-auto px-8 w-full">
                         <div className="text-center mb-16">
@@ -450,20 +485,17 @@ export default function Home() {
                         <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
                             {[
                                 {
-                                    quote:
-                                        "Calliope IDE has completely transformed our development workflow. What used to take days now takes hours.",
+                                    quote: "Calliope IDE has completely transformed our development workflow. What used to take days now takes hours.",
                                     author: "Alex Johnson",
                                     role: "Lead Developer at BlockTech",
                                 },
                                 {
-                                    quote:
-                                        "The integrated testing environment is a game-changer. I can test my contracts in real-time without leaving the IDE.",
+                                    quote: "The integrated testing environment is a game-changer. I can test my contracts in real-time without leaving the IDE.",
                                     author: "Sarah Chen",
                                     role: "Smart Contract Engineer",
                                 },
                                 {
-                                    quote:
-                                        "As someone new to blockchain development, Calliope IDE made the learning curve much less steep. Highly recommended.",
+                                    quote: "As someone new to blockchain development, Calliope IDE made the learning curve much less steep. Highly recommended.",
                                     author: "Michael Rodriguez",
                                     role: "Full-Stack Developer",
                                 },
@@ -479,9 +511,7 @@ export default function Home() {
                                     <div className="flex flex-col h-full">
                                         <div className="mb-4">
                                             {[1, 2, 3, 4, 5].map((star) => (
-                                                <span key={star} className="text-emerald-600 dark:text-[#9FEF00]">
-                                                    ★
-                                                </span>
+                                                <span key={star} className="text-emerald-600 dark:text-[#9FEF00]">★</span>
                                             ))}
                                         </div>
                                         <p className="text-foreground/80 flex-1 mb-6">"{testimonial.quote}"</p>
@@ -496,12 +526,12 @@ export default function Home() {
                     </div>
                 </section>
 
-                {/* CTA Section */}
+                {/* ── CTA ─────────────────────────────────────────────────── */}
                 <section className="py-24 relative overflow-hidden">
                     <div className="absolute inset-0">
-                        <div className="absolute inset-0 theme-cta-overlay"></div>
-                        <div className="absolute top-0 left-0 right-0 h-px theme-divider-gradient"></div>
-                        <div className="absolute bottom-0 left-0 right-0 h-px theme-divider-gradient"></div>
+                        <div className="absolute inset-0 theme-cta-overlay" />
+                        <div className="absolute top-0 left-0 right-0 h-px theme-divider-gradient" />
+                        <div className="absolute bottom-0 left-0 right-0 h-px theme-divider-gradient" />
                     </div>
 
                     <div className="mx-auto px-4 sm:px-6 lg:px-8 w-full relative z-10">
@@ -532,7 +562,7 @@ export default function Home() {
                                 transition={{ duration: 0.5, delay: 0.2 }}
                                 className="flex flex-col sm:flex-row gap-4 justify-center items-center"
                             >
-                                <Link href="/app">
+                                <Link href={ctaHref}>
                                     <Button className="w-full sm:w-auto h-10 sm:h-12 px-6 sm:px-8 bg-[#9FEF00] text-black hover:bg-[#9FEF00]/80">
                                         Get Started for Free
                                     </Button>
@@ -552,64 +582,35 @@ export default function Home() {
                 </section>
             </main>
 
+            {/* ── Footer ──────────────────────────────────────────────────── */}
             <footer className="border-t border-border/70 py-16 relative">
                 <div className="mx-auto px-8 w-full">
                     <div className="grid grid-cols-2 md:grid-cols-4 gap-8 mb-12">
-                        <div>
-                            <h3 className="font-medium mb-4">Product</h3>
-                            <ul className="space-y-2">
-                                {["Features", "Pricing", "Roadmap", "Changelog"].map((item) => (
-                                    <li key={item}>
-                                        <Link href="#" className="text-sm text-foreground/50 hover:text-foreground transition-colors">
-                                            {item}
-                                        </Link>
-                                    </li>
-                                ))}
-                            </ul>
-                        </div>
-                        <div>
-                            <h3 className="font-medium mb-4">Resources</h3>
-                            <ul className="space-y-2">
-                                {["Documentation", "Guides", "API Reference", "Examples"].map((item) => (
-                                    <li key={item}>
-                                        <Link href="#" className="text-sm text-foreground/50 hover:text-foreground transition-colors">
-                                            {item}
-                                        </Link>
-                                    </li>
-                                ))}
-                            </ul>
-                        </div>
-                        <div>
-                            <h3 className="font-medium mb-4">Company</h3>
-                            <ul className="space-y-2">
-                                {["About", "Blog", "Careers", "Contact"].map((item) => (
-                                    <li key={item}>
-                                        <Link href="#" className="text-sm text-foreground/50 hover:text-foreground transition-colors">
-                                            {item}
-                                        </Link>
-                                    </li>
-                                ))}
-                            </ul>
-                        </div>
-                        <div>
-                            <h3 className="font-medium mb-4">Legal</h3>
-                            <ul className="space-y-2">
-                                {["Privacy", "Terms", "Security", "Cookies"].map((item) => (
-                                    <li key={item}>
-                                        <Link href="#" className="text-sm text-foreground/50 hover:text-foreground transition-colors">
-                                            {item}
-                                        </Link>
-                                    </li>
-                                ))}
-                            </ul>
-                        </div>
+                        {[
+                            { heading: "Product",   items: ["Features", "Pricing", "Roadmap", "Changelog"] },
+                            { heading: "Resources", items: ["Documentation", "Guides", "API Reference", "Examples"] },
+                            { heading: "Company",   items: ["About", "Blog", "Careers", "Contact"] },
+                            { heading: "Legal",     items: ["Privacy", "Terms", "Security", "Cookies"] },
+                        ].map(({ heading, items }) => (
+                            <div key={heading}>
+                                <h3 className="font-medium mb-4">{heading}</h3>
+                                <ul className="space-y-2">
+                                    {items.map(item => (
+                                        <li key={item}>
+                                            <Link href="#" className="text-sm text-foreground/50 hover:text-foreground transition-colors">
+                                                {item}
+                                            </Link>
+                                        </li>
+                                    ))}
+                                </ul>
+                            </div>
+                        ))}
                     </div>
 
                     <div className="flex flex-col md:flex-row items-center justify-between pt-8 border-t border-border/70">
                         <div className="flex items-center gap-2 mb-4 md:mb-0">
                             <img src="logo.svg" alt="Calliope" className="h-[35px]" />
                         </div>
-
                         <div className="text-sm text-foreground/50">
                             &copy; {new Date().getFullYear()} Calliope IDE. All rights reserved.
                         </div>
