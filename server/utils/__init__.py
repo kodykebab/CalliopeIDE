@@ -28,6 +28,8 @@ from .secure_execution import (
     ExecutionTimeoutError,
     MemoryLimitError
 )
+from . import context_builder
+from . import prompt_builder
 
 __all__ = [
     'generate_access_token',
@@ -47,5 +49,7 @@ __all__ = [
     'secure_execute',
     'SecurityError',
     'ExecutionTimeoutError',
-    'MemoryLimitError'
+    'MemoryLimitError',
+    'context_builder',
+    'prompt_builder'
 ]

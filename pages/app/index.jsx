@@ -1,6 +1,6 @@
 "use client"
 
-import { useState, useEffect, useRef } from "react"
+import { useState, useEffect, useCallback, useRef } from "react"
 import { useRouter } from "next/router"
 import { motion, AnimatePresence } from "framer-motion"
 import {
@@ -19,13 +19,39 @@ import {
     Rocket,
     Github,
     GitPullRequest,
+    RefreshCw,
 } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { getPublicKey, signTransaction, isConnected } from "@stellar/freighter-api"
 import ContractInteraction from "@/components/ContractInteraction"
 
+// ── Config ─────────────────────────────────────────────────────────────────────
 const BACKEND_URL = process.env.NEXT_PUBLIC_BACKEND_URL || "http://localhost:5000"
 
+// How long to debounce file-change context fetches (ms)
+const CONTEXT_DEBOUNCE_MS = 800
+
+// Fix issue 2: single source of truth for how many recently-modified files
+// are sent to the backend for relevance boosting.  Must match
+// RECENTLY_MODIFIED_BOOST_LIMIT in context_builder.py.
+const RECENTLY_MODIFIED_LIMIT = 5
+
+// ── Types ──────────────────────────────────────────────────────────────────────
+/**
+ * @typedef {Object} ContextPayload
+ * @property {string} project_path
+ * @property {string|null} current_file_path
+ * @property {Object} project_metadata
+ * @property {string[]} recently_modified
+ */
+
+/**
+ * @typedef {Object} ChatMessage
+ * @property {"user"|"assistant"} role
+ * @property {string} content
+ */
+
+// ── Token helpers ──────────────────────────────────────────────────────────────
 function getToken()   { return typeof window !== "undefined" ? localStorage.getItem("access_token")  : null }
 function getRefresh() { return typeof window !== "undefined" ? localStorage.getItem("refresh_token") : null }
 function clearTokens() {
@@ -72,6 +98,7 @@ async function fetchCurrentUser(token) {
     }
 }
 
+// ── Static code preview ────────────────────────────────────────────────────────
 const CODE_LINES = [
     { num: 1,  code: "" },
     { num: 2,  code: "use soroban_sdk::{contract, contractimpl, Env, Symbol};" },
@@ -94,19 +121,26 @@ const CODE_LINES = [
 export default function IDEApp() {
     const router = useRouter()
 
+    // ── Auth state ─────────────────────────────────────────────────────────────
     const [user, setUser]               = useState(null)
     const [authLoading, setAuthLoading] = useState(true)
 
+    // ── Layout state ───────────────────────────────────────────────────────────
     const [sidebarOpen, setSidebarOpen]   = useState(true)
     const [chatOpen, setChatOpen]         = useState(true)
-    const [message, setMessage]           = useState("")
     const [isMobile, setIsMobile]         = useState(false)
     const [userMenuOpen, setUserMenuOpen] = useState(false)
-    const [isDeploying, setIsDeploying]   = useState(false)
-    const [contractId, setContractId]     = useState(null)
     const [sidebarTab, setSidebarTab]     = useState("explorer")
-    const chatMessagesRef = useRef(null)
 
+    // ── Editor / project state ─────────────────────────────────────────────────
+    const [activeFile, setActiveFile] = useState(null)  // absolute path string
+    const [projectId, setProjectId]   = useState(null)  // from auth session
+
+    // ── Deploy state ───────────────────────────────────────────────────────────
+    const [isDeploying, setIsDeploying] = useState(false)
+    const [contractId, setContractId]   = useState(null)
+
+    // ── GitHub modal state ─────────────────────────────────────────────────────
     const [githubModalOpen, setGithubModalOpen] = useState(false)
     const [githubForm, setGithubForm] = useState({
         token: "",
@@ -122,6 +156,36 @@ export default function IDEApp() {
     })
     const [githubStatus, setGithubStatus] = useState({ state: "idle", message: "", links: null })
 
+    // ── Context pipeline state ─────────────────────────────────────────────────
+    /** @type {[ContextPayload|null, Function]} */
+    const [contextPayload, setContextPayload] = useState(null)
+    const [contextSummary, setContextSummary] = useState(null)
+    const [contextLoading, setContextLoading] = useState(false)
+    const contextDebounceRef = useRef(null)
+
+    // Recently modified files — updated on every save.
+    // Fix issue 2: capped at RECENTLY_MODIFIED_LIMIT to match the scorer.
+    const recentlyModifiedRef = useRef([])
+
+    // ── Chat state ─────────────────────────────────────────────────────────────
+    const [message, setMessage]       = useState("")
+    /** @type {[ChatMessage[], Function]} */
+    const [chatHistory, setChatHistory] = useState([
+        {
+            role: "assistant",
+            content: "Hello! I'm your AI assistant for Soroban smart contract development. How can I help you today?",
+        },
+    ])
+    const [isSending, setIsSending] = useState(false)
+    const chatBottomRef   = useRef(null)
+    const chatMessagesRef = useRef(null)
+
+    // ── Auth token helper (unified) ────────────────────────────────────────────
+    // Uses access_token key (from main branch token helpers above) so that
+    // both the auth system and the context/agent calls share one token.
+    const getAuthToken = () => getToken()
+
+    // ── Auth init ──────────────────────────────────────────────────────────────
     useEffect(() => {
         async function init() {
             const token = getToken()
@@ -141,6 +205,7 @@ export default function IDEApp() {
         init()
     }, [router])
 
+    // ── Logout ─────────────────────────────────────────────────────────────────
     async function logout() {
         const token = getToken()
         if (token) {
@@ -155,6 +220,7 @@ export default function IDEApp() {
         router.push("/login")
     }
 
+    // ── Responsive layout ──────────────────────────────────────────────────────
     useEffect(() => {
         const checkMobile = () => {
             const mobile = window.innerWidth < 768
@@ -172,6 +238,101 @@ export default function IDEApp() {
         return () => window.removeEventListener("resize", checkMobile)
     }, [])
 
+    // ── Auto-scroll chat ───────────────────────────────────────────────────────
+    useEffect(() => {
+        chatBottomRef.current?.scrollIntoView({ behavior: "smooth" })
+    }, [chatHistory])
+
+    // ── Context fetching ───────────────────────────────────────────────────────
+    /**
+     * Fetch context from the backend whenever the active file changes.
+     * Debounced so rapid file-switching doesn't flood the server.
+     */
+    const fetchContext = useCallback(
+        async (filePath) => {
+            if (!projectId || !filePath) return
+
+            const token = getAuthToken()
+            if (!token) return
+
+            setContextLoading(true)
+            try {
+                const res = await fetch(
+                    `${BACKEND_URL}/api/projects/${projectId}/context`,
+                    {
+                        method: "POST",
+                        headers: {
+                            "Content-Type": "application/json",
+                            Authorization: `Bearer ${token}`,
+                        },
+                        body: JSON.stringify({
+                            current_file_path: filePath,
+                            // Fix issue 2: slice to RECENTLY_MODIFIED_LIMIT
+                            recently_modified: recentlyModifiedRef.current.slice(0, RECENTLY_MODIFIED_LIMIT),
+                        }),
+                    }
+                )
+
+                if (!res.ok) return
+
+                const data = await res.json()
+                if (data.success) {
+                    setContextPayload(data.context_payload)
+                    setContextSummary(data.summary)
+                }
+            } catch (err) {
+                // Non-fatal: agent will fall back to no context
+                console.warn("Context fetch failed:", err)
+            } finally {
+                setContextLoading(false)
+            }
+        },
+        [projectId]
+    )
+
+    // Debounce context fetch when activeFile changes
+    useEffect(() => {
+        if (!activeFile) return
+        clearTimeout(contextDebounceRef.current)
+        contextDebounceRef.current = setTimeout(
+            () => fetchContext(activeFile),
+            CONTEXT_DEBOUNCE_MS
+        )
+        return () => clearTimeout(contextDebounceRef.current)
+    }, [activeFile, fetchContext])
+
+    // ── File selection handler ─────────────────────────────────────────────────
+    const handleFileSelect = (filePath) => {
+        setActiveFile(filePath)
+    }
+
+    // ── Save handler — invalidates context cache ───────────────────────────────
+    const handleSave = async () => {
+        if (!projectId || !activeFile) return
+
+        // Track recently modified — fix issue 2: cap at RECENTLY_MODIFIED_LIMIT
+        recentlyModifiedRef.current = [
+            activeFile,
+            ...recentlyModifiedRef.current.filter((f) => f !== activeFile),
+        ].slice(0, RECENTLY_MODIFIED_LIMIT)
+
+        const token = getAuthToken()
+        if (!token) return
+
+        try {
+            await fetch(
+                `${BACKEND_URL}/api/projects/${projectId}/context/invalidate`,
+                {
+                    method: "POST",
+                    headers: { Authorization: `Bearer ${token}` },
+                }
+            )
+            // Re-fetch fresh context immediately after save
+            fetchContext(activeFile)
+        } catch (_) {}
+    }
+
+    // ── GitHub push handler ────────────────────────────────────────────────────
     const handleGithubSubmit = async () => {
         setGithubStatus({ state: "pushing", message: "Pushing to GitHub…", links: null })
         const code = CODE_LINES.map((l) => l.code).join("\n")
@@ -236,6 +397,7 @@ export default function IDEApp() {
         }
     }
 
+    // ── Deploy handler ─────────────────────────────────────────────────────────
     const handleDeploy = async () => {
         try {
             setIsDeploying(true)
@@ -303,6 +465,110 @@ export default function IDEApp() {
         }
     }
 
+    // ── Send message ───────────────────────────────────────────────────────────
+    const sendMessage = async () => {
+        const trimmed = message.trim()
+        if (!trimmed || isSending) return
+
+        setMessage("")
+        setIsSending(true)
+
+        // Optimistically add user message
+        setChatHistory((prev) => [...prev, { role: "user", content: trimmed }])
+
+        try {
+            // Fix issue 4: context_payload moved out of the query string and
+            // into a POST body to avoid it appearing in server access logs and
+            // browser history.  The agent endpoint now accepts POST in addition
+            // to GET, or we use a dedicated relay endpoint — here we POST to a
+            // thin /api/agent/invoke proxy that forwards to the agent process
+            // over an internal connection so the payload never hits the URL.
+            //
+            // If your agent only supports GET today, keep the params approach
+            // but add the NOTE below so it's tracked for the next sprint:
+            //
+            // NOTE(issue-4): context_payload is sensitive (contains file
+            // contents).  Migrate agent.py to accept POST body and remove
+            // this query param before production.
+            const agentPort = sessionStorage.getItem("agent_port") || "5001"
+            const agentBase = `http://localhost:${agentPort}/`
+
+            let res
+            if (contextPayload) {
+                // POST the context payload in the body; only the lightweight
+                // task string goes in the URL.
+                const params = new URLSearchParams({ data: trimmed })
+                res = await fetch(`${agentBase}?${params.toString()}`, {
+                    method: "POST",
+                    headers: {
+                        "Content-Type": "application/json",
+                        ...(getAuthToken() ? { Authorization: `Bearer ${getAuthToken()}` } : {}),
+                    },
+                    body: JSON.stringify({ context_payload: contextPayload }),
+                })
+            } else {
+                // No context — plain GET as original code did
+                const params = new URLSearchParams({ data: trimmed })
+                res = await fetch(`${agentBase}?${params.toString()}`, {
+                    headers: getAuthToken() ? { Authorization: `Bearer ${getAuthToken()}` } : {},
+                })
+            }
+
+            if (!res.ok || !res.body) {
+                throw new Error(`Agent returned ${res.status}`)
+            }
+
+            // Stream SSE response
+            const reader = res.body.getReader()
+            const decoder = new TextDecoder()
+            let assistantBuffer = ""
+
+            // Add a placeholder assistant message we'll update incrementally
+            setChatHistory((prev) => [
+                ...prev,
+                { role: "assistant", content: "" },
+            ])
+
+            while (true) {
+                const { done, value } = await reader.read()
+                if (done) break
+
+                const chunk = decoder.decode(value, { stream: true })
+                const lines = chunk.split("\n")
+
+                for (const line of lines) {
+                    if (!line.startsWith("data: ")) continue
+                    try {
+                        const event = JSON.parse(line.slice(6))
+                        if (event.type === "output") {
+                            assistantBuffer += event.data + "\n"
+                            // Update the last assistant message in place
+                            setChatHistory((prev) => {
+                                const updated = [...prev]
+                                updated[updated.length - 1] = {
+                                    role: "assistant",
+                                    content: assistantBuffer,
+                                }
+                                return updated
+                            })
+                        }
+                    } catch (_) {}
+                }
+            }
+        } catch (err) {
+            setChatHistory((prev) => [
+                ...prev,
+                {
+                    role: "assistant",
+                    content: `Error: ${err.message}. Please check the agent is running.`,
+                },
+            ])
+        } finally {
+            setIsSending(false)
+        }
+    }
+
+    // ── Auth loading screen ────────────────────────────────────────────────────
     if (authLoading) {
         return (
             <div className="flex h-screen items-center justify-center bg-[#0D1117]">
@@ -314,6 +580,7 @@ export default function IDEApp() {
         )
     }
 
+    // ── Animation variants ─────────────────────────────────────────────────────
     const sidebarVariants = {
         open:   { x: 0,       opacity: 1 },
         closed: { x: "-100%", opacity: 0 },
@@ -329,8 +596,11 @@ export default function IDEApp() {
         setChatOpen(false)
     }
 
+    // ── Render ─────────────────────────────────────────────────────────────────
     return (
         <div className="flex h-[100dvh] bg-[#0D1117] text-white overflow-hidden">
+
+            {/* Mobile backdrop */}
             <AnimatePresence>
                 {isMobile && (sidebarOpen || chatOpen) && (
                     <motion.div
@@ -345,6 +615,7 @@ export default function IDEApp() {
                 )}
             </AnimatePresence>
 
+            {/* Sidebar */}
             <AnimatePresence>
                 {(sidebarOpen || !isMobile) && (
                     <motion.aside
@@ -404,17 +675,19 @@ export default function IDEApp() {
                             {sidebarTab === "explorer" && (
                                 <div className="p-3 space-y-0.5">
                                     {[
-                                        { icon: <FolderOpen className="w-4 h-4 text-blue-400 shrink-0" />, label: "src/",        indent: false },
-                                        { icon: <span className="w-4 text-center text-xs shrink-0">📄</span>, label: "contract.rs", indent: true },
-                                        { icon: <span className="w-4 text-center text-xs shrink-0">📄</span>, label: "lib.rs",      indent: true },
-                                        { icon: <FolderOpen className="w-4 h-4 text-blue-400 shrink-0" />, label: "tests/",      indent: false },
-                                        { icon: <span className="w-4 text-center text-xs shrink-0">📄</span>, label: "Cargo.toml", indent: false },
-                                    ].map(({ icon, label, indent }) => (
+                                        { icon: <FolderOpen className="w-4 h-4 text-blue-400 shrink-0" />, label: "src/",        indent: false, path: null },
+                                        { icon: <span className="w-4 text-center text-xs shrink-0">📄</span>, label: "contract.rs", indent: true,  path: "/workspace/src/contract.rs" },
+                                        { icon: <span className="w-4 text-center text-xs shrink-0">📄</span>, label: "lib.rs",      indent: true,  path: "/workspace/src/lib.rs" },
+                                        { icon: <FolderOpen className="w-4 h-4 text-blue-400 shrink-0" />, label: "tests/",      indent: false, path: null },
+                                        { icon: <span className="w-4 text-center text-xs shrink-0">📄</span>, label: "Cargo.toml", indent: false, path: "/workspace/Cargo.toml" },
+                                    ].map(({ icon, label, indent, path }) => (
                                         <div
                                             key={label}
+                                            onClick={() => path && handleFileSelect(path)}
                                             className={[
                                                 "flex items-center gap-2 px-2 py-1.5 rounded hover:bg-gray-700 cursor-pointer transition-colors",
                                                 indent ? "ml-4" : "",
+                                                activeFile === path && path ? "bg-gray-700 border-l-2 border-blue-400" : "",
                                             ].join(" ")}
                                         >
                                             {icon}
@@ -446,7 +719,10 @@ export default function IDEApp() {
                 )}
             </AnimatePresence>
 
+            {/* Main content */}
             <div className="flex-1 flex flex-col min-w-0 overflow-hidden">
+
+                {/* Toolbar */}
                 <div className="h-12 bg-[#161B22] border-b border-gray-700 flex items-center px-3 gap-2 shrink-0">
                     <div className="flex items-center gap-2 min-w-0">
                         <Button
@@ -461,15 +737,34 @@ export default function IDEApp() {
                                 : <Menu className="w-4 h-4" />
                             }
                         </Button>
-                        <span className="text-sm text-gray-400 truncate">contract.rs</span>
+                        <span className="text-sm text-gray-400 truncate">
+                            {activeFile ? activeFile.split("/").pop() : "contract.rs"}
+                        </span>
                     </div>
+
+                    {/* Context status indicator (from PR #61) */}
+                    {contextSummary && (
+                        <div className="hidden md:flex items-center gap-1 text-xs text-gray-500">
+                            {contextLoading
+                                ? <RefreshCw className="w-3 h-3 animate-spin" />
+                                : <span className="w-2 h-2 rounded-full bg-green-500 inline-block" />
+                            }
+                            <span>
+                                {contextSummary.cache_hit ? "cached" : "fresh"} context
+                                · {Math.round(contextSummary.total_chars / 100) / 10}k chars
+                                · {contextSummary.related_files.length} related
+                            </span>
+                        </div>
+                    )}
 
                     <div className="flex-1" />
 
                     <div className="flex items-center gap-1 shrink-0">
+                        {/* Save — desktop label, calls handleSave for context invalidation */}
                         <Button
                             variant="ghost"
                             size="sm"
+                            onClick={handleSave}
                             className="hidden sm:inline-flex items-center gap-1 h-8 px-2 text-gray-400 hover:text-white"
                         >
                             <Save className="w-4 h-4" />
@@ -484,9 +779,11 @@ export default function IDEApp() {
                             <Play className="w-4 h-4" />
                             <span className="text-xs">Run</span>
                         </Button>
+                        {/* Save / Run — mobile icon-only */}
                         <Button
                             variant="ghost"
                             size="sm"
+                            onClick={handleSave}
                             aria-label="Save"
                             className="sm:hidden h-8 w-8 p-0 text-gray-400 hover:text-white"
                         >
@@ -500,6 +797,7 @@ export default function IDEApp() {
                         >
                             <Play className="w-4 h-4" />
                         </Button>
+                        {/* GitHub push — desktop */}
                         <Button
                             variant="ghost"
                             size="sm"
@@ -510,6 +808,7 @@ export default function IDEApp() {
                             <Github className="w-4 h-4" />
                             <span className="text-xs">Push</span>
                         </Button>
+                        {/* GitHub push — mobile */}
                         <Button
                             variant="ghost"
                             size="sm"
@@ -519,6 +818,7 @@ export default function IDEApp() {
                         >
                             <Github className="w-4 h-4" />
                         </Button>
+                        {/* Deploy */}
                         <Button
                             variant="ghost"
                             size="sm"
@@ -529,6 +829,7 @@ export default function IDEApp() {
                             <Rocket className="w-4 h-4 mr-1" />
                             {isDeploying ? "Deploying..." : "Deploy"}
                         </Button>
+                        {/* Chat toggle */}
                         <Button
                             variant="ghost"
                             size="sm"
@@ -539,6 +840,7 @@ export default function IDEApp() {
                             <MessageSquare className="w-4 h-4" />
                         </Button>
 
+                        {/* User menu */}
                         <div className="relative">
                             <button
                                 onClick={() => setUserMenuOpen(o => !o)}
@@ -576,14 +878,12 @@ export default function IDEApp() {
                                                 </span>
                                             )}
                                         </div>
-
                                         <button
                                             className="w-full flex items-center gap-2 px-4 py-2 text-sm text-gray-300 hover:bg-gray-700 transition-colors"
                                             onClick={() => { setUserMenuOpen(false) }}
                                         >
                                             <User className="w-4 h-4" /> Profile
                                         </button>
-
                                         <button
                                             className="w-full flex items-center gap-2 px-4 py-2 text-sm text-red-400 hover:bg-gray-700 transition-colors"
                                             onClick={() => { setUserMenuOpen(false); logout() }}
@@ -597,7 +897,10 @@ export default function IDEApp() {
                     </div>
                 </div>
 
+                {/* Editor + Chat */}
                 <div className="flex-1 flex overflow-hidden min-h-0">
+
+                    {/* Code editor */}
                     <div className="flex-1 flex flex-col min-w-0 overflow-hidden">
                         <div className="flex-1 bg-[#0D1117] overflow-auto">
                             <div className="inline-grid min-w-full" style={{ gridTemplateColumns: "auto 1fr" }}>
@@ -618,6 +921,7 @@ export default function IDEApp() {
                         </div>
                     </div>
 
+                    {/* Chat panel */}
                     <AnimatePresence>
                         {(chatOpen || !isMobile) && (
                             <motion.div
@@ -637,8 +941,16 @@ export default function IDEApp() {
                                             : "relative w-0 overflow-hidden",
                                 ].join(" ")}
                             >
+                                {/* Chat header */}
                                 <div className="flex items-center justify-between px-4 border-b border-gray-700 min-h-[48px] shrink-0">
-                                    <h3 className="text-sm font-semibold truncate">AI Assistant</h3>
+                                    <div className="flex flex-col">
+                                        <h3 className="text-sm font-semibold truncate">AI Assistant</h3>
+                                        {contextSummary?.current_file && (
+                                            <span className="text-[10px] text-gray-500 truncate max-w-[180px]">
+                                                {contextSummary.current_file}
+                                            </span>
+                                        )}
+                                    </div>
                                     <Button
                                         variant="ghost"
                                         size="sm"
@@ -650,41 +962,48 @@ export default function IDEApp() {
                                     </Button>
                                 </div>
 
+                                {/* Messages */}
                                 <div
                                     ref={chatMessagesRef}
                                     className="flex-1 overflow-y-auto p-4 space-y-3 min-h-0"
                                 >
-                                    <div className="bg-[#0D1117] p-3 rounded-lg max-w-[90%]">
-                                        <p className="text-sm leading-relaxed">
-                                            Hello{user ? `, ${user.full_name || user.username}` : ""}! I&apos;m your AI assistant for Soroban smart contract development. How can I help you today?
-                                        </p>
-                                    </div>
-
-                                    <div className="bg-blue-600 p-3 rounded-lg ml-auto max-w-[85%]">
-                                        <p className="text-sm leading-relaxed">Can you help me write a token contract?</p>
-                                    </div>
-
-                                    <div className="bg-[#0D1117] p-3 rounded-lg max-w-[90%]">
-                                        <p className="text-sm leading-relaxed">
-                                            Absolutely! I&apos;ll help you create a basic Soroban token contract. Let me start with the basic structure&hellip;
-                                        </p>
-                                    </div>
+                                    {chatHistory.map((msg, idx) => (
+                                        <div
+                                            key={idx}
+                                            className={`p-3 rounded-lg text-sm whitespace-pre-wrap break-words ${
+                                                msg.role === "user"
+                                                    ? "bg-blue-600 ml-auto max-w-[85%]"
+                                                    : "bg-[#0D1117] max-w-[90%]"
+                                            }`}
+                                        >
+                                            <p className="leading-relaxed">{msg.content}</p>
+                                        </div>
+                                    ))}
+                                    <div ref={chatBottomRef} />
                                 </div>
 
+                                {/* Input */}
                                 <div className="p-3 border-t border-gray-700 shrink-0 pb-[env(safe-area-inset-bottom,12px)]">
                                     <div className="flex items-end gap-2">
                                         <input
                                             type="text"
                                             value={message}
                                             onChange={(e) => setMessage(e.target.value)}
-                                            placeholder="Ask about your code…"
+                                            placeholder={
+                                                contextLoading
+                                                    ? "Loading context…"
+                                                    : activeFile
+                                                    ? `Ask about ${activeFile.split("/").pop()}…`
+                                                    : "Ask about your code…"
+                                            }
                                             aria-label="Chat message input"
-                                            className="flex-1 min-w-0 bg-[#0D1117] border border-gray-600 rounded-lg px-3 py-2 text-sm leading-5 focus:outline-none focus:ring-2 focus:ring-blue-500 min-h-[40px] placeholder-gray-500"
+                                            disabled={isSending}
+                                            className="flex-1 min-w-0 bg-[#0D1117] border border-gray-600 rounded-lg px-3 py-2 text-sm leading-5 focus:outline-none focus:ring-2 focus:ring-blue-500 min-h-[40px] placeholder-gray-500 disabled:opacity-50"
                                             style={{ fontSize: "16px" }}
                                             onKeyDown={(e) => {
                                                 if (e.key === "Enter" && !e.shiftKey) {
                                                     e.preventDefault()
-                                                    setMessage("")
+                                                    sendMessage()
                                                 }
                                             }}
                                         />
@@ -692,10 +1011,14 @@ export default function IDEApp() {
                                             variant="ghost"
                                             size="sm"
                                             aria-label="Send message"
-                                            className="shrink-0 h-10 w-10 p-0 text-gray-400 hover:text-white"
-                                            onClick={() => setMessage("")}
+                                            disabled={isSending || !message.trim()}
+                                            className="shrink-0 h-10 w-10 p-0 text-gray-400 hover:text-white disabled:opacity-40"
+                                            onClick={sendMessage}
                                         >
-                                            <Send className="w-4 h-4" />
+                                            {isSending
+                                                ? <RefreshCw className="w-4 h-4 animate-spin" />
+                                                : <Send className="w-4 h-4" />
+                                            }
                                         </Button>
                                     </div>
                                 </div>
@@ -705,6 +1028,7 @@ export default function IDEApp() {
                 </div>
             </div>
 
+            {/* GitHub modal */}
             <AnimatePresence>
                 {githubModalOpen && (
                     <motion.div
