@@ -13,12 +13,14 @@ import {
     Send,
     ChevronLeft,
     ChevronRight,
-    Rocket
+    Zap,
+    Rocket,
     Github,
     GitPullRequest
 } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { getPublicKey, signTransaction, isConnected } from "@stellar/freighter-api"
+import ContractInteraction from "@/components/ContractInteraction"
 
 // Sample code lines for the editor preview
 const CODE_LINES = [
@@ -47,6 +49,7 @@ export default function IDEApp() {
     const [isMobile, setIsMobile] = useState(false)
     const [isDeploying, setIsDeploying] = useState(false)
     const [contractId, setContractId] = useState(null)
+    const [sidebarTab, setSidebarTab] = useState("explorer")
     const chatMessagesRef = useRef(null)
 
     // ── GitHub Push / PR state ────────────────────────────────────────────
@@ -276,9 +279,30 @@ export default function IDEApp() {
                     >
                         {/* Sidebar Header */}
                         <div className="flex items-center justify-between px-4 py-3 border-b border-gray-700 min-h-[48px]">
-                            <h2 className="text-sm font-semibold uppercase tracking-wide text-gray-300 truncate">
-                                Explorer
-                            </h2>
+                            <div className="flex gap-1">
+                                <button
+                                    onClick={() => setSidebarTab("explorer")}
+                                    className={`flex items-center gap-1 px-2 py-1 rounded text-xs font-medium transition-colors ${
+                                        sidebarTab === "explorer"
+                                            ? "bg-gray-700 text-white"
+                                            : "text-gray-400 hover:text-white"
+                                    }`}
+                                >
+                                    <FolderOpen className="w-3 h-3" />
+                                    Explorer
+                                </button>
+                                <button
+                                    onClick={() => setSidebarTab("contract")}
+                                    className={`flex items-center gap-1 px-2 py-1 rounded text-xs font-medium transition-colors ${
+                                        sidebarTab === "contract"
+                                            ? "bg-gray-700 text-white"
+                                            : "text-gray-400 hover:text-white"
+                                    }`}
+                                >
+                                    <Zap className="w-3 h-3" />
+                                    Contract
+                                </button>
+                            </div>
                             <Button
                                 variant="ghost"
                                 size="sm"
@@ -290,26 +314,37 @@ export default function IDEApp() {
                             </Button>
                         </div>
 
-                        {/* File Explorer */}
-                        <div className="flex-1 overflow-y-auto p-3 space-y-0.5">
-                            {[
-                                { icon: <FolderOpen className="w-4 h-4 text-blue-400 shrink-0" />, label: "src/",        indent: false },
-                                { icon: <span className="w-4 text-center text-xs shrink-0">📄</span>, label: "contract.rs", indent: true },
-                                { icon: <span className="w-4 text-center text-xs shrink-0">📄</span>, label: "lib.rs",      indent: true },
-                                { icon: <FolderOpen className="w-4 h-4 text-blue-400 shrink-0" />, label: "tests/",      indent: false },
-                                { icon: <span className="w-4 text-center text-xs shrink-0">📄</span>, label: "Cargo.toml", indent: false },
-                            ].map(({ icon, label, indent }) => (
-                                <div
-                                    key={label}
-                                    className={[
-                                        "flex items-center gap-2 px-2 py-1.5 rounded hover:bg-gray-700 cursor-pointer transition-colors",
-                                        indent ? "ml-4" : "",
-                                    ].join(" ")}
-                                >
-                                    {icon}
-                                    <span className="text-sm truncate">{label}</span>
+                        {/* Sidebar Body */}
+                        <div className="flex-1 overflow-y-auto">
+                            {sidebarTab === "explorer" && (
+                                <div className="p-3 space-y-0.5">
+                                    {[
+                                        { icon: <FolderOpen className="w-4 h-4 text-blue-400 shrink-0" />, label: "src/",        indent: false },
+                                        { icon: <span className="w-4 text-center text-xs shrink-0">📄</span>, label: "contract.rs", indent: true },
+                                        { icon: <span className="w-4 text-center text-xs shrink-0">📄</span>, label: "lib.rs",      indent: true },
+                                        { icon: <FolderOpen className="w-4 h-4 text-blue-400 shrink-0" />, label: "tests/",      indent: false },
+                                        { icon: <span className="w-4 text-center text-xs shrink-0">📄</span>, label: "Cargo.toml", indent: false },
+                                    ].map(({ icon, label, indent }) => (
+                                        <div
+                                            key={label}
+                                            className={[
+                                                "flex items-center gap-2 px-2 py-1.5 rounded hover:bg-gray-700 cursor-pointer transition-colors",
+                                                indent ? "ml-4" : "",
+                                            ].join(" ")}
+                                        >
+                                            {icon}
+                                            <span className="text-sm truncate">{label}</span>
+                                        </div>
+                                    ))}
                                 </div>
-                            ))}
+                            )}
+
+                            {sidebarTab === "contract" && (
+                                <ContractInteraction
+                                    sessionId={null}
+                                    authToken={null}
+                                />
+                            )}
                         </div>
 
                         {/* Sidebar Footer */}
