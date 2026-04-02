@@ -13,7 +13,7 @@ import {
     Send,
     ChevronLeft,
     ChevronRight,
-    Rocket
+    Rocket,
     Github,
     GitPullRequest
 } from "lucide-react"
