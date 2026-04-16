@@ -193,5 +193,8 @@ class TestListDeployments:
         assert result is None
 
     def test_resolve_wasm_path_valid(self):
-        result = m._resolve_wasm_path("target/release/c.wasm", "/tmp/instance1_user1")
-        assert result == "/tmp/instance1_user1/target/release/c.wasm"
+        import os
+        base_dir = "/tmp/instance1_user1"
+        result = m._resolve_wasm_path("target/release/c.wasm", base_dir)
+        expected = os.path.abspath(os.path.join(base_dir, "target/release/c.wasm"))
+        assert result == expected
