@@ -385,6 +385,121 @@ def invalidate_project_context(current_user, project_id):
         return jsonify({'success': False, 'error': 'An error occurred while invalidating context'}), 500
 
 
+@project_bp.route('/<int:project_id>/files/save', methods=['POST'])
+@token_required
+def save_project_file(current_user, project_id):
+    """
+    Save file content to the filesystem.
+    
+    Expected JSON body:
+    {
+        "file_path": "/absolute/path/to/file.rs",
+        "content": "..."
+    }
+    """
+    try:
+        project = ProjectMetadata.query.filter_by(
+            id=project_id, user_id=current_user.id, is_active=True
+        ).first()
+
+        if not project:
+            return jsonify({'success': False, 'error': 'Project not found'}), 404
+
+        if not project.project_path:
+            return jsonify({'success': False, 'error': 'Project has no path configured'}), 400
+
+        data = request.get_json() or {}
+        file_path = data.get('file_path')
+        content = data.get('content')
+
+        if not file_path:
+            return jsonify({'success': False, 'error': 'file_path is required'}), 400
+
+        if content is None:
+            return jsonify({'success': False, 'error': 'content is required'}), 400
+
+        import os
+        abs_project = os.path.realpath(project.project_path)
+        abs_file = os.path.realpath(file_path)
+        if not abs_file.startswith(abs_project):
+            return jsonify({'success': False, 'error': 'File path is outside project directory'}), 400
+
+        # Ensure directory exists
+        os.makedirs(os.path.dirname(abs_file), exist_ok=True)
+
+        with open(abs_file, 'w', encoding='utf-8') as f:
+            f.write(content)
+
+        # Update last accessed time
+        project.update_last_accessed()
+        # Invalidate cache since the file changed
+        from server.utils.context_builder import invalidate_cache
+        invalidate_cache(project.project_path)
+
+        return jsonify({
+            'success': True, 
+            'message': 'File saved successfully'
+        }), 200
+
+    except Exception as e:
+        logger.exception("Save project file error")
+        capture_exception(e, {
+            'route': 'project.save_project_file',
+            'user_id': current_user.id,
+            'project_id': project_id,
+        })
+        return jsonify({'success': False, 'error': 'An error occurred while saving the file'}), 500
+
+
+@project_bp.route('/<int:project_id>/files/read', methods=['GET'])
+@token_required
+def read_project_file(current_user, project_id):
+    """
+    Read file content from the filesystem.
+    Query parameter: file_path (e.g. ?file_path=/path/to/file.rs)
+    """
+    try:
+        project = ProjectMetadata.query.filter_by(
+            id=project_id, user_id=current_user.id, is_active=True
+        ).first()
+
+        if not project:
+            return jsonify({'success': False, 'error': 'Project not found'}), 404
+
+        if not project.project_path:
+            return jsonify({'success': False, 'error': 'Project has no path configured'}), 400
+
+        file_path = request.args.get('file_path')
+        if not file_path:
+            return jsonify({'success': False, 'error': 'file_path query parameter is required'}), 400
+
+        import os
+        abs_project = os.path.realpath(project.project_path)
+        abs_file = os.path.realpath(file_path)
+        if not abs_file.startswith(abs_project):
+            return jsonify({'success': False, 'error': 'File path is outside project directory'}), 400
+
+        if not os.path.isfile(abs_file):
+            return jsonify({'success': False, 'error': 'File not found'}), 404
+
+        with open(abs_file, 'r', encoding='utf-8') as f:
+            content = f.read()
+
+        return jsonify({
+            'success': True,
+            'content': content
+        }), 200
+
+    except Exception as e:
+        logger.exception("Read project file error")
+        capture_exception(e, {
+            'route': 'project.read_project_file',
+            'user_id': current_user.id,
+            'project_id': project_id,
+        })
+        return jsonify({'success': False, 'error': 'An error occurred while reading the file'}), 500
+
+
 # ── Helper ────────────────────────────────────────────────────────────────────
 
 def _relative_path(absolute: str, base: str) -> str:

@@ -87,7 +87,7 @@ def validate_registration_data(data):
     if not is_valid:
         errors['password'] = error
     
-    password_confirm = data.get('password_confirm', '')
+    password_confirm = data.get('password_confirm', password)
     if password != password_confirm:
         errors['password_confirm'] = "Passwords do not match"
     
