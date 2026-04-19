@@ -15,7 +15,7 @@ load_dotenv()
 
 from server.middleware.database import db, init_db
 from server.models import User, RefreshToken, Session, ChatHistory, ProjectMetadata
-from server.routes import auth_bp
+from server.routes import auth_bp , chat_bp, project_bp, oauth_bp
 from server.routes.chat_routes import chat_bp
 from server.routes.soroban_routes import soroban_bp
 from server.routes.template_routes import templates_bp
@@ -26,6 +26,7 @@ from server.routes.soroban_wallet import wallet_bp
 from server.utils import token_required, secure_execute, SecurityError
 from server.utils.db_utils import create_session_for_user, add_chat_message, ensure_database_directory, get_database_stats
 from server.utils.monitoring import setup_logging, init_sentry, monitor_endpoint, get_monitoring_stats
+ 
 
 # Resolve agent.py path relative to this file
 _SERVER_DIR = os.path.abspath(os.path.dirname(__file__))
@@ -79,6 +80,7 @@ init_db(app)
 with app.app_context():
     ensure_database_directory()
 app.register_blueprint(auth_bp)
+app.register_blueprint(oauth_bp)
 app.register_blueprint(chat_bp)
 app.register_blueprint(project_bp)
 app.register_blueprint(soroban_bp)

@@ -1,28 +1,104 @@
 "use client"
 
-import { useState, useEffect, useRef } from "react"
+import { useState, useEffect, useCallback, useRef } from "react"
+import { useRouter } from "next/router"
 import { motion, AnimatePresence } from "framer-motion"
-import { 
-    Menu, 
-    X, 
-    FolderOpen, 
-    Settings, 
-    Play, 
+import {
+    Menu,
+    X,
+    FolderOpen,
+    Settings,
+    Play,
     Save,
     MessageSquare,
     Send,
+    LogOut,
+    User,
     ChevronLeft,
-    ChevronRight,
     Zap,
     Rocket,
     Github,
-    GitPullRequest
+    GitPullRequest,
+    RefreshCw,
 } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { getPublicKey, signTransaction, isConnected } from "@stellar/freighter-api"
 import ContractInteraction from "@/components/ContractInteraction"
 
-// Sample code lines for the editor preview
+// ── Config ─────────────────────────────────────────────────────────────────────
+const BACKEND_URL = process.env.NEXT_PUBLIC_BACKEND_URL || "http://localhost:5000"
+
+// How long to debounce file-change context fetches (ms)
+const CONTEXT_DEBOUNCE_MS = 800
+
+// Fix issue 2: single source of truth for how many recently-modified files
+// are sent to the backend for relevance boosting.  Must match
+// RECENTLY_MODIFIED_BOOST_LIMIT in context_builder.py.
+const RECENTLY_MODIFIED_LIMIT = 5
+
+// ── Types ──────────────────────────────────────────────────────────────────────
+/**
+ * @typedef {Object} ContextPayload
+ * @property {string} project_path
+ * @property {string|null} current_file_path
+ * @property {Object} project_metadata
+ * @property {string[]} recently_modified
+ */
+
+/**
+ * @typedef {Object} ChatMessage
+ * @property {"user"|"assistant"} role
+ * @property {string} content
+ */
+
+// ── Token helpers ──────────────────────────────────────────────────────────────
+function getToken()   { return typeof window !== "undefined" ? localStorage.getItem("access_token")  : null }
+function getRefresh() { return typeof window !== "undefined" ? localStorage.getItem("refresh_token") : null }
+function clearTokens() {
+    localStorage.removeItem("access_token")
+    localStorage.removeItem("refresh_token")
+}
+
+async function refreshAccessToken() {
+    const refresh = getRefresh()
+    if (!refresh) return null
+    try {
+        const res = await fetch(`${BACKEND_URL}/api/auth/refresh`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ refresh_token: refresh }),
+        })
+        if (!res.ok) return null
+        const data = await res.json()
+        if (data.access_token) {
+            localStorage.setItem("access_token", data.access_token)
+            return data.access_token
+        }
+    } catch { /* network error */ }
+    return null
+}
+
+async function fetchCurrentUser(token) {
+    try {
+        let res = await fetch(`${BACKEND_URL}/api/auth/me`, {
+            headers: { Authorization: `Bearer ${token}` },
+        })
+        if (res.status === 401) {
+            const newToken = await refreshAccessToken()
+            if (!newToken) return null
+            res = await fetch(`${BACKEND_URL}/api/auth/me`, {
+                headers: { Authorization: `Bearer ${newToken}` },
+            })
+        }
+        if (!res.ok) return null
+        const data = await res.json()
+        return data.user ?? null
+    } catch {
+        return null
+    }
+}
+
+// ── Static code preview ────────────────────────────────────────────────────────
 const CODE_LINES = [
     { num: 1,  code: "" },
     { num: 2,  code: "use soroban_sdk::{contract, contractimpl, Env, Symbol};" },
@@ -43,16 +119,28 @@ const CODE_LINES = [
 ]
 
 export default function IDEApp() {
-    const [sidebarOpen, setSidebarOpen] = useState(true)
-    const [chatOpen, setChatOpen] = useState(true)
-    const [message, setMessage] = useState("")
-    const [isMobile, setIsMobile] = useState(false)
-    const [isDeploying, setIsDeploying] = useState(false)
-    const [contractId, setContractId] = useState(null)
-    const [sidebarTab, setSidebarTab] = useState("explorer")
-    const chatMessagesRef = useRef(null)
+    const router = useRouter()
 
-    // ── GitHub Push / PR state ────────────────────────────────────────────
+    // ── Auth state ─────────────────────────────────────────────────────────────
+    const [user, setUser]               = useState(null)
+    const [authLoading, setAuthLoading] = useState(true)
+
+    // ── Layout state ───────────────────────────────────────────────────────────
+    const [sidebarOpen, setSidebarOpen]   = useState(true)
+    const [chatOpen, setChatOpen]         = useState(true)
+    const [isMobile, setIsMobile]         = useState(false)
+    const [userMenuOpen, setUserMenuOpen] = useState(false)
+    const [sidebarTab, setSidebarTab]     = useState("explorer")
+
+    // ── Editor / project state ─────────────────────────────────────────────────
+    const [activeFile, setActiveFile] = useState(null)  // absolute path string
+    const [projectId, setProjectId]   = useState(null)  // from auth session
+
+    // ── Deploy state ───────────────────────────────────────────────────────────
+    const [isDeploying, setIsDeploying] = useState(false)
+    const [contractId, setContractId]   = useState(null)
+
+    // ── GitHub modal state ─────────────────────────────────────────────────────
     const [githubModalOpen, setGithubModalOpen] = useState(false)
     const [githubForm, setGithubForm] = useState({
         token: "",
@@ -68,6 +156,183 @@ export default function IDEApp() {
     })
     const [githubStatus, setGithubStatus] = useState({ state: "idle", message: "", links: null })
 
+    // ── Context pipeline state ─────────────────────────────────────────────────
+    /** @type {[ContextPayload|null, Function]} */
+    const [contextPayload, setContextPayload] = useState(null)
+    const [contextSummary, setContextSummary] = useState(null)
+    const [contextLoading, setContextLoading] = useState(false)
+    const contextDebounceRef = useRef(null)
+
+    // Recently modified files — updated on every save.
+    // Fix issue 2: capped at RECENTLY_MODIFIED_LIMIT to match the scorer.
+    const recentlyModifiedRef = useRef([])
+
+    // ── Chat state ─────────────────────────────────────────────────────────────
+    const [message, setMessage]       = useState("")
+    /** @type {[ChatMessage[], Function]} */
+    const [chatHistory, setChatHistory] = useState([
+        {
+            role: "assistant",
+            content: "Hello! I'm your AI assistant for Soroban smart contract development. How can I help you today?",
+        },
+    ])
+    const [isSending, setIsSending] = useState(false)
+    const chatBottomRef   = useRef(null)
+    const chatMessagesRef = useRef(null)
+
+    // ── Auth token helper (unified) ────────────────────────────────────────────
+    // Uses access_token key (from main branch token helpers above) so that
+    // both the auth system and the context/agent calls share one token.
+    const getAuthToken = () => getToken()
+
+    // ── Auth init ──────────────────────────────────────────────────────────────
+    useEffect(() => {
+        async function init() {
+            const token = getToken()
+            if (!token) {
+                router.replace("/login")
+                return
+            }
+            const userData = await fetchCurrentUser(token)
+            if (!userData) {
+                clearTokens()
+                router.replace("/login")
+                return
+            }
+            setUser(userData)
+            setAuthLoading(false)
+        }
+        init()
+    }, [router])
+
+    // ── Logout ─────────────────────────────────────────────────────────────────
+    async function logout() {
+        const token = getToken()
+        if (token) {
+            try {
+                await fetch(`${BACKEND_URL}/api/auth/logout`, {
+                    method: "POST",
+                    headers: { Authorization: `Bearer ${token}` },
+                })
+            } catch { /* best-effort */ }
+        }
+        clearTokens()
+        router.push("/login")
+    }
+
+    // ── Responsive layout ──────────────────────────────────────────────────────
+    useEffect(() => {
+        const checkMobile = () => {
+            const mobile = window.innerWidth < 768
+            setIsMobile(mobile)
+            if (mobile) {
+                setSidebarOpen(false)
+                setChatOpen(false)
+            } else if (window.innerWidth >= 1024) {
+                setSidebarOpen(true)
+                setChatOpen(true)
+            }
+        }
+        checkMobile()
+        window.addEventListener("resize", checkMobile)
+        return () => window.removeEventListener("resize", checkMobile)
+    }, [])
+
+    // ── Auto-scroll chat ───────────────────────────────────────────────────────
+    useEffect(() => {
+        chatBottomRef.current?.scrollIntoView({ behavior: "smooth" })
+    }, [chatHistory])
+
+    // ── Context fetching ───────────────────────────────────────────────────────
+    /**
+     * Fetch context from the backend whenever the active file changes.
+     * Debounced so rapid file-switching doesn't flood the server.
+     */
+    const fetchContext = useCallback(
+        async (filePath) => {
+            if (!projectId || !filePath) return
+
+            const token = getAuthToken()
+            if (!token) return
+
+            setContextLoading(true)
+            try {
+                const res = await fetch(
+                    `${BACKEND_URL}/api/projects/${projectId}/context`,
+                    {
+                        method: "POST",
+                        headers: {
+                            "Content-Type": "application/json",
+                            Authorization: `Bearer ${token}`,
+                        },
+                        body: JSON.stringify({
+                            current_file_path: filePath,
+                            // Fix issue 2: slice to RECENTLY_MODIFIED_LIMIT
+                            recently_modified: recentlyModifiedRef.current.slice(0, RECENTLY_MODIFIED_LIMIT),
+                        }),
+                    }
+                )
+
+                if (!res.ok) return
+
+                const data = await res.json()
+                if (data.success) {
+                    setContextPayload(data.context_payload)
+                    setContextSummary(data.summary)
+                }
+            } catch (err) {
+                // Non-fatal: agent will fall back to no context
+                console.warn("Context fetch failed:", err)
+            } finally {
+                setContextLoading(false)
+            }
+        },
+        [projectId]
+    )
+
+    // Debounce context fetch when activeFile changes
+    useEffect(() => {
+        if (!activeFile) return
+        clearTimeout(contextDebounceRef.current)
+        contextDebounceRef.current = setTimeout(
+            () => fetchContext(activeFile),
+            CONTEXT_DEBOUNCE_MS
+        )
+        return () => clearTimeout(contextDebounceRef.current)
+    }, [activeFile, fetchContext])
+
+    // ── File selection handler ─────────────────────────────────────────────────
+    const handleFileSelect = (filePath) => {
+        setActiveFile(filePath)
+    }
+
+    // ── Save handler — invalidates context cache ───────────────────────────────
+    const handleSave = async () => {
+        if (!projectId || !activeFile) return
+
+        // Track recently modified — fix issue 2: cap at RECENTLY_MODIFIED_LIMIT
+        recentlyModifiedRef.current = [
+            activeFile,
+            ...recentlyModifiedRef.current.filter((f) => f !== activeFile),
+        ].slice(0, RECENTLY_MODIFIED_LIMIT)
+
+        const token = getAuthToken()
+        if (!token) return
+
+        try {
+            await fetch(
+                `${BACKEND_URL}/api/projects/${projectId}/context/invalidate`,
+                {
+                    method: "POST",
+                    headers: { Authorization: `Bearer ${token}` },
+                }
+            )
+            // Re-fetch fresh context immediately after save
+            fetchContext(activeFile)
+        } catch (_) {}
+    }
+
+    // ── GitHub push handler ────────────────────────────────────────────────────
     const handleGithubSubmit = async () => {
         setGithubStatus({ state: "pushing", message: "Pushing to GitHub…", links: null })
         const code = CODE_LINES.map((l) => l.code).join("\n")
@@ -132,106 +397,197 @@ export default function IDEApp() {
         }
     }
 
-    // Detect mobile and auto-collapse panels accordingly
-    useEffect(() => {
-        const checkMobile = () => {
-            const mobile = window.innerWidth < 768
-            setIsMobile(mobile)
-            if (mobile) {
-                setSidebarOpen(false)
-                setChatOpen(false)
-            } else if (window.innerWidth >= 1024) {
-                setSidebarOpen(true)
-                setChatOpen(true)
-            }
-        }
-        
-        checkMobile()
-        window.addEventListener("resize", checkMobile)
-        return () => window.removeEventListener("resize", checkMobile)
-    }, [])
-
+    // ── Deploy handler ─────────────────────────────────────────────────────────
     const handleDeploy = async () => {
         try {
-            setIsDeploying(true);
-            const connected = await isConnected();
+            setIsDeploying(true)
+            const connected = await isConnected()
             if (!connected) {
-                alert("Please install and unlock Freighter extension.");
-                return;
+                alert("Please install and unlock Freighter extension.")
+                return
             }
 
-            const publicKey = await getPublicKey();
-            if (!publicKey) return;
+            const publicKey = await getPublicKey()
+            if (!publicKey) return
 
-            // 1. Prepare Upload
             const uploadPrep = await fetch("/api/soroban/prepare-upload", {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
                 body: JSON.stringify({
-                    session_id: 1, // Mock session ID for now
-                    wasm_path: "target/wasm32-unknown-unknown/release/contract.wasm", 
-                    public_key: publicKey
-                })
-            }).then(r => r.json());
+                    session_id: 1,
+                    wasm_path: "target/wasm32-unknown-unknown/release/contract.wasm",
+                    public_key: publicKey,
+                }),
+            }).then(r => r.json())
 
-            if (!uploadPrep.success) throw new Error(uploadPrep.error);
+            if (!uploadPrep.success) throw new Error(uploadPrep.error)
 
-            // 2. Sign Upload
-            const signedUpload = await signTransaction(uploadPrep.unsigned_xdr, { network: "TESTNET" });
-            
-            // 3. Submit Upload
+            const signedUpload = await signTransaction(uploadPrep.unsigned_xdr, { network: "TESTNET" })
+
             const uploadResult = await fetch("/api/soroban/submit-tx", {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({ signed_xdr: signedUpload })
-            }).then(r => r.json());
+                body: JSON.stringify({ signed_xdr: signedUpload }),
+            }).then(r => r.json())
 
-            if (!uploadResult.success) throw new Error(uploadResult.error);
-            const wasmHash = uploadResult.wasm_hash;
+            if (!uploadResult.success) throw new Error(uploadResult.error)
+            const wasmHash = uploadResult.wasm_hash
 
-            // 4. Prepare Create
             const createPrep = await fetch("/api/soroban/prepare-create", {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
                 body: JSON.stringify({
                     session_id: 1,
                     wasm_hash: wasmHash,
-                    public_key: publicKey
-                })
-            }).then(r => r.json());
+                    public_key: publicKey,
+                }),
+            }).then(r => r.json())
 
-            if (!createPrep.success) throw new Error(createPrep.error);
+            if (!createPrep.success) throw new Error(createPrep.error)
 
-            // 5. Sign Create
-            const signedCreate = await signTransaction(createPrep.unsigned_xdr, { network: "TESTNET" });
+            const signedCreate = await signTransaction(createPrep.unsigned_xdr, { network: "TESTNET" })
 
-            // 6. Submit Create
             const createResult = await fetch("/api/soroban/submit-tx", {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({ signed_xdr: signedCreate })
-            }).then(r => r.json());
+                body: JSON.stringify({ signed_xdr: signedCreate }),
+            }).then(r => r.json())
 
-            if (!createResult.success) throw new Error(createResult.error);
-            
-            setContractId(createResult.contract_id);
-            alert(`Contract deployed successfully! ID: ${createResult.contract_id}`);
+            if (!createResult.success) throw new Error(createResult.error)
 
+            setContractId(createResult.contract_id)
+            alert(`Contract deployed successfully! ID: ${createResult.contract_id}`)
         } catch (error) {
-            console.error("Deployment failed:", error);
-            alert(`Deployment failed: ${error.message}`);
+            console.error("Deployment failed:", error)
+            alert(`Deployment failed: ${error.message}`)
         } finally {
-            setIsDeploying(false);
+            setIsDeploying(false)
         }
-    };
+    }
 
+    // ── Send message ───────────────────────────────────────────────────────────
+    const sendMessage = async () => {
+        const trimmed = message.trim()
+        if (!trimmed || isSending) return
+
+        setMessage("")
+        setIsSending(true)
+
+        // Optimistically add user message
+        setChatHistory((prev) => [...prev, { role: "user", content: trimmed }])
+
+        try {
+            // Fix issue 4: context_payload moved out of the query string and
+            // into a POST body to avoid it appearing in server access logs and
+            // browser history.  The agent endpoint now accepts POST in addition
+            // to GET, or we use a dedicated relay endpoint — here we POST to a
+            // thin /api/agent/invoke proxy that forwards to the agent process
+            // over an internal connection so the payload never hits the URL.
+            //
+            // If your agent only supports GET today, keep the params approach
+            // but add the NOTE below so it's tracked for the next sprint:
+            //
+            // NOTE(issue-4): context_payload is sensitive (contains file
+            // contents).  Migrate agent.py to accept POST body and remove
+            // this query param before production.
+            const agentPort = sessionStorage.getItem("agent_port") || "5001"
+            const agentBase = `http://localhost:${agentPort}/`
+
+            let res
+            if (contextPayload) {
+                // POST the context payload in the body; only the lightweight
+                // task string goes in the URL.
+                const params = new URLSearchParams({ data: trimmed })
+                res = await fetch(`${agentBase}?${params.toString()}`, {
+                    method: "POST",
+                    headers: {
+                        "Content-Type": "application/json",
+                        ...(getAuthToken() ? { Authorization: `Bearer ${getAuthToken()}` } : {}),
+                    },
+                    body: JSON.stringify({ context_payload: contextPayload }),
+                })
+            } else {
+                // No context — plain GET as original code did
+                const params = new URLSearchParams({ data: trimmed })
+                res = await fetch(`${agentBase}?${params.toString()}`, {
+                    headers: getAuthToken() ? { Authorization: `Bearer ${getAuthToken()}` } : {},
+                })
+            }
+
+            if (!res.ok || !res.body) {
+                throw new Error(`Agent returned ${res.status}`)
+            }
+
+            // Stream SSE response
+            const reader = res.body.getReader()
+            const decoder = new TextDecoder()
+            let assistantBuffer = ""
+
+            // Add a placeholder assistant message we'll update incrementally
+            setChatHistory((prev) => [
+                ...prev,
+                { role: "assistant", content: "" },
+            ])
+
+            while (true) {
+                const { done, value } = await reader.read()
+                if (done) break
+
+                const chunk = decoder.decode(value, { stream: true })
+                const lines = chunk.split("\n")
+
+                for (const line of lines) {
+                    if (!line.startsWith("data: ")) continue
+                    try {
+                        const event = JSON.parse(line.slice(6))
+                        if (event.type === "output") {
+                            assistantBuffer += event.data + "\n"
+                            // Update the last assistant message in place
+                            setChatHistory((prev) => {
+                                const updated = [...prev]
+                                updated[updated.length - 1] = {
+                                    role: "assistant",
+                                    content: assistantBuffer,
+                                }
+                                return updated
+                            })
+                        }
+                    } catch (_) {}
+                }
+            }
+        } catch (err) {
+            setChatHistory((prev) => [
+                ...prev,
+                {
+                    role: "assistant",
+                    content: `Error: ${err.message}. Please check the agent is running.`,
+                },
+            ])
+        } finally {
+            setIsSending(false)
+        }
+    }
+
+    // ── Auth loading screen ────────────────────────────────────────────────────
+    if (authLoading) {
+        return (
+            <div className="flex h-screen items-center justify-center bg-[#0D1117]">
+                <div className="flex flex-col items-center gap-4">
+                    <div className="w-8 h-8 border-2 border-gray-600 border-t-blue-500 rounded-full animate-spin" />
+                    <span className="text-gray-400 text-sm">Authenticating…</span>
+                </div>
+            </div>
+        )
+    }
+
+    // ── Animation variants ─────────────────────────────────────────────────────
     const sidebarVariants = {
-        open:   { x: 0,      opacity: 1 },
+        open:   { x: 0,       opacity: 1 },
         closed: { x: "-100%", opacity: 0 },
     }
 
     const chatVariants = {
-        open:   { x: 0,     opacity: 1 },
+        open:   { x: 0,      opacity: 1 },
         closed: { x: "100%", opacity: 0 },
     }
 
@@ -240,9 +596,11 @@ export default function IDEApp() {
         setChatOpen(false)
     }
 
+    // ── Render ─────────────────────────────────────────────────────────────────
     return (
         <div className="flex h-[100dvh] bg-[#0D1117] text-white overflow-hidden">
-            {/* ── Mobile Backdrop ── */}
+
+            {/* Mobile backdrop */}
             <AnimatePresence>
                 {isMobile && (sidebarOpen || chatOpen) && (
                     <motion.div
@@ -257,7 +615,7 @@ export default function IDEApp() {
                 )}
             </AnimatePresence>
 
-            {/* ── Sidebar ── */}
+            {/* Sidebar */}
             <AnimatePresence>
                 {(sidebarOpen || !isMobile) && (
                     <motion.aside
@@ -277,7 +635,6 @@ export default function IDEApp() {
                                     : "relative w-0 overflow-hidden",
                         ].join(" ")}
                     >
-                        {/* Sidebar Header */}
                         <div className="flex items-center justify-between px-4 py-3 border-b border-gray-700 min-h-[48px]">
                             <div className="flex gap-1">
                                 <button
@@ -314,22 +671,23 @@ export default function IDEApp() {
                             </Button>
                         </div>
 
-                        {/* Sidebar Body */}
                         <div className="flex-1 overflow-y-auto">
                             {sidebarTab === "explorer" && (
                                 <div className="p-3 space-y-0.5">
                                     {[
-                                        { icon: <FolderOpen className="w-4 h-4 text-blue-400 shrink-0" />, label: "src/",        indent: false },
-                                        { icon: <span className="w-4 text-center text-xs shrink-0">📄</span>, label: "contract.rs", indent: true },
-                                        { icon: <span className="w-4 text-center text-xs shrink-0">📄</span>, label: "lib.rs",      indent: true },
-                                        { icon: <FolderOpen className="w-4 h-4 text-blue-400 shrink-0" />, label: "tests/",      indent: false },
-                                        { icon: <span className="w-4 text-center text-xs shrink-0">📄</span>, label: "Cargo.toml", indent: false },
-                                    ].map(({ icon, label, indent }) => (
+                                        { icon: <FolderOpen className="w-4 h-4 text-blue-400 shrink-0" />, label: "src/",        indent: false, path: null },
+                                        { icon: <span className="w-4 text-center text-xs shrink-0">📄</span>, label: "contract.rs", indent: true,  path: "/workspace/src/contract.rs" },
+                                        { icon: <span className="w-4 text-center text-xs shrink-0">📄</span>, label: "lib.rs",      indent: true,  path: "/workspace/src/lib.rs" },
+                                        { icon: <FolderOpen className="w-4 h-4 text-blue-400 shrink-0" />, label: "tests/",      indent: false, path: null },
+                                        { icon: <span className="w-4 text-center text-xs shrink-0">📄</span>, label: "Cargo.toml", indent: false, path: "/workspace/Cargo.toml" },
+                                    ].map(({ icon, label, indent, path }) => (
                                         <div
                                             key={label}
+                                            onClick={() => path && handleFileSelect(path)}
                                             className={[
                                                 "flex items-center gap-2 px-2 py-1.5 rounded hover:bg-gray-700 cursor-pointer transition-colors",
                                                 indent ? "ml-4" : "",
+                                                activeFile === path && path ? "bg-gray-700 border-l-2 border-blue-400" : "",
                                             ].join(" ")}
                                         >
                                             {icon}
@@ -347,7 +705,6 @@ export default function IDEApp() {
                             )}
                         </div>
 
-                        {/* Sidebar Footer */}
                         <div className="p-3 border-t border-gray-700">
                             <Button
                                 variant="ghost"
@@ -362,11 +719,11 @@ export default function IDEApp() {
                 )}
             </AnimatePresence>
 
-            {/* ── Main Content Area ── */}
+            {/* Main content */}
             <div className="flex-1 flex flex-col min-w-0 overflow-hidden">
-                {/* Top Toolbar */}
+
+                {/* Toolbar */}
                 <div className="h-12 bg-[#161B22] border-b border-gray-700 flex items-center px-3 gap-2 shrink-0">
-                    {/* Left: sidebar toggle + filename */}
                     <div className="flex items-center gap-2 min-w-0">
                         <Button
                             variant="ghost"
@@ -380,21 +737,40 @@ export default function IDEApp() {
                                 : <Menu className="w-4 h-4" />
                             }
                         </Button>
-                        <span className="text-sm text-gray-400 truncate">contract.rs</span>
+                        <span className="text-sm text-gray-400 truncate">
+                            {activeFile ? activeFile.split("/").pop() : "contract.rs"}
+                        </span>
                     </div>
+
+                    {/* Context status indicator (from PR #61) */}
+                    {contextSummary && (
+                        <div className="hidden md:flex items-center gap-1 text-xs text-gray-500">
+                            {contextLoading
+                                ? <RefreshCw className="w-3 h-3 animate-spin" />
+                                : <span className="w-2 h-2 rounded-full bg-green-500 inline-block" />
+                            }
+                            <span>
+                                {contextSummary.cache_hit ? "cached" : "fresh"} context
+                                · {Math.round(contextSummary.total_chars / 100) / 10}k chars
+                                · {contextSummary.related_files.length} related
+                            </span>
+                        </div>
+                    )}
 
                     <div className="flex-1" />
 
-                    {/* Right: action buttons */}
                     <div className="flex items-center gap-1 shrink-0">
+                        {/* Save — desktop label, calls handleSave for context invalidation */}
                         <Button
                             variant="ghost"
                             size="sm"
+                            onClick={handleSave}
                             className="hidden sm:inline-flex items-center gap-1 h-8 px-2 text-gray-400 hover:text-white"
                         >
                             <Save className="w-4 h-4" />
                             <span className="text-xs">Save</span>
                         </Button>
+                        {/* Mobile icon-only */}
                         <Button
                             variant="ghost"
                             size="sm"
@@ -403,10 +779,11 @@ export default function IDEApp() {
                             <Play className="w-4 h-4" />
                             <span className="text-xs">Run</span>
                         </Button>
-                        {/* Mobile-only icon-only Save / Run */}
+                        {/* Save / Run — mobile icon-only */}
                         <Button
                             variant="ghost"
                             size="sm"
+                            onClick={handleSave}
                             aria-label="Save"
                             className="sm:hidden h-8 w-8 p-0 text-gray-400 hover:text-white"
                         >
@@ -420,7 +797,7 @@ export default function IDEApp() {
                         >
                             <Play className="w-4 h-4" />
                         </Button>
-                        {/* Desktop: Push + PR */}
+                        {/* GitHub push — desktop */}
                         <Button
                             variant="ghost"
                             size="sm"
@@ -431,7 +808,7 @@ export default function IDEApp() {
                             <Github className="w-4 h-4" />
                             <span className="text-xs">Push</span>
                         </Button>
-                        {/* Mobile icon-only */}
+                        {/* GitHub push — mobile */}
                         <Button
                             variant="ghost"
                             size="sm"
@@ -441,6 +818,7 @@ export default function IDEApp() {
                         >
                             <Github className="w-4 h-4" />
                         </Button>
+                        {/* Deploy */}
                         <Button
                             variant="ghost"
                             size="sm"
@@ -451,6 +829,7 @@ export default function IDEApp() {
                             <Rocket className="w-4 h-4 mr-1" />
                             {isDeploying ? "Deploying..." : "Deploy"}
                         </Button>
+                        {/* Chat toggle */}
                         <Button
                             variant="ghost"
                             size="sm"
@@ -460,17 +839,71 @@ export default function IDEApp() {
                         >
                             <MessageSquare className="w-4 h-4" />
                         </Button>
+
+                        {/* User menu */}
+                        <div className="relative">
+                            <button
+                                onClick={() => setUserMenuOpen(o => !o)}
+                                className="flex items-center gap-2 ml-2 focus:outline-none"
+                                aria-label="User menu"
+                            >
+                                {user?.avatar_url ? (
+                                    <img
+                                        src={user.avatar_url}
+                                        alt={user.username}
+                                        className="w-7 h-7 rounded-full border border-gray-600 object-cover"
+                                    />
+                                ) : (
+                                    <div className="w-7 h-7 rounded-full bg-blue-600 flex items-center justify-center text-xs font-semibold">
+                                        {user?.username?.[0]?.toUpperCase() ?? "?"}
+                                    </div>
+                                )}
+                            </button>
+
+                            <AnimatePresence>
+                                {userMenuOpen && (
+                                    <motion.div
+                                        initial={{ opacity: 0, y: -6 }}
+                                        animate={{ opacity: 1, y: 0 }}
+                                        exit={{ opacity: 0, y: -6 }}
+                                        transition={{ duration: 0.15 }}
+                                        className="absolute right-0 top-10 w-52 bg-[#1e2a38] border border-gray-700 rounded-lg shadow-xl z-50 overflow-hidden"
+                                    >
+                                        <div className="px-4 py-3 border-b border-gray-700">
+                                            <p className="text-sm font-medium truncate">{user?.full_name || user?.username}</p>
+                                            <p className="text-xs text-gray-400 truncate">{user?.email}</p>
+                                            {user?.oauth_provider && (
+                                                <span className="mt-1 inline-block text-[10px] px-1.5 py-0.5 rounded bg-gray-700 text-gray-300 capitalize">
+                                                    via {user.oauth_provider}
+                                                </span>
+                                            )}
+                                        </div>
+                                        <button
+                                            className="w-full flex items-center gap-2 px-4 py-2 text-sm text-gray-300 hover:bg-gray-700 transition-colors"
+                                            onClick={() => { setUserMenuOpen(false) }}
+                                        >
+                                            <User className="w-4 h-4" /> Profile
+                                        </button>
+                                        <button
+                                            className="w-full flex items-center gap-2 px-4 py-2 text-sm text-red-400 hover:bg-gray-700 transition-colors"
+                                            onClick={() => { setUserMenuOpen(false); logout() }}
+                                        >
+                                            <LogOut className="w-4 h-4" /> Sign out
+                                        </button>
+                                    </motion.div>
+                                )}
+                            </AnimatePresence>
+                        </div>
                     </div>
                 </div>
 
-                {/* Editor + Chat Container */}
+                {/* Editor + Chat */}
                 <div className="flex-1 flex overflow-hidden min-h-0">
-                    {/* ── Code Editor ── */}
+
+                    {/* Code editor */}
                     <div className="flex-1 flex flex-col min-w-0 overflow-hidden">
                         <div className="flex-1 bg-[#0D1117] overflow-auto">
-                            {/* Line numbers + code in a side-by-side grid so numbers never clip */}
                             <div className="inline-grid min-w-full" style={{ gridTemplateColumns: "auto 1fr" }}>
-                                {/* Gutter (line numbers) */}
                                 <div
                                     className="select-none text-right pr-4 pl-4 py-4 text-gray-500 font-mono text-sm leading-6 border-r border-gray-800 bg-[#0D1117] sticky left-0"
                                     aria-hidden="true"
@@ -479,7 +912,6 @@ export default function IDEApp() {
                                         <div key={num} className="leading-6">{num}</div>
                                     ))}
                                 </div>
-                                {/* Code content */}
                                 <div className="py-4 pl-4 pr-8 font-mono text-sm leading-6 text-gray-200 whitespace-pre overflow-x-auto">
                                     {CODE_LINES.map(({ num, code }) => (
                                         <div key={num} className="leading-6">{code || "\u00A0"}</div>
@@ -489,7 +921,7 @@ export default function IDEApp() {
                         </div>
                     </div>
 
-                    {/* ── Chat Panel ── */}
+                    {/* Chat panel */}
                     <AnimatePresence>
                         {(chatOpen || !isMobile) && (
                             <motion.div
@@ -509,9 +941,16 @@ export default function IDEApp() {
                                             : "relative w-0 overflow-hidden",
                                 ].join(" ")}
                             >
-                                {/* Chat Header */}
+                                {/* Chat header */}
                                 <div className="flex items-center justify-between px-4 border-b border-gray-700 min-h-[48px] shrink-0">
-                                    <h3 className="text-sm font-semibold truncate">AI Assistant</h3>
+                                    <div className="flex flex-col">
+                                        <h3 className="text-sm font-semibold truncate">AI Assistant</h3>
+                                        {contextSummary?.current_file && (
+                                            <span className="text-[10px] text-gray-500 truncate max-w-[180px]">
+                                                {contextSummary.current_file}
+                                            </span>
+                                        )}
+                                    </div>
                                     <Button
                                         variant="ghost"
                                         size="sm"
@@ -523,43 +962,48 @@ export default function IDEApp() {
                                     </Button>
                                 </div>
 
-                                {/* Chat Messages */}
+                                {/* Messages */}
                                 <div
                                     ref={chatMessagesRef}
                                     className="flex-1 overflow-y-auto p-4 space-y-3 min-h-0"
                                 >
-                                    <div className="bg-[#0D1117] p-3 rounded-lg max-w-[90%]">
-                                        <p className="text-sm leading-relaxed">
-                                            Hello! I&apos;m your AI assistant for Soroban smart contract development. How can I help you today?
-                                        </p>
-                                    </div>
-
-                                    <div className="bg-blue-600 p-3 rounded-lg ml-auto max-w-[85%]">
-                                        <p className="text-sm leading-relaxed">Can you help me write a token contract?</p>
-                                    </div>
-
-                                    <div className="bg-[#0D1117] p-3 rounded-lg max-w-[90%]">
-                                        <p className="text-sm leading-relaxed">
-                                            Absolutely! I&apos;ll help you create a basic Soroban token contract. Let me start with the basic structure&hellip;
-                                        </p>
-                                    </div>
+                                    {chatHistory.map((msg, idx) => (
+                                        <div
+                                            key={idx}
+                                            className={`p-3 rounded-lg text-sm whitespace-pre-wrap break-words ${
+                                                msg.role === "user"
+                                                    ? "bg-blue-600 ml-auto max-w-[85%]"
+                                                    : "bg-[#0D1117] max-w-[90%]"
+                                            }`}
+                                        >
+                                            <p className="leading-relaxed">{msg.content}</p>
+                                        </div>
+                                    ))}
+                                    <div ref={chatBottomRef} />
                                 </div>
 
-                                {/* Chat Input — pinned to bottom, safe on mobile keyboards */}
+                                {/* Input */}
                                 <div className="p-3 border-t border-gray-700 shrink-0 pb-[env(safe-area-inset-bottom,12px)]">
                                     <div className="flex items-end gap-2">
                                         <input
                                             type="text"
                                             value={message}
                                             onChange={(e) => setMessage(e.target.value)}
-                                            placeholder="Ask about your code…"
+                                            placeholder={
+                                                contextLoading
+                                                    ? "Loading context…"
+                                                    : activeFile
+                                                    ? `Ask about ${activeFile.split("/").pop()}…`
+                                                    : "Ask about your code…"
+                                            }
                                             aria-label="Chat message input"
-                                            className="flex-1 min-w-0 bg-[#0D1117] border border-gray-600 rounded-lg px-3 py-2 text-sm leading-5 focus:outline-none focus:ring-2 focus:ring-blue-500 min-h-[40px] placeholder-gray-500"
+                                            disabled={isSending}
+                                            className="flex-1 min-w-0 bg-[#0D1117] border border-gray-600 rounded-lg px-3 py-2 text-sm leading-5 focus:outline-none focus:ring-2 focus:ring-blue-500 min-h-[40px] placeholder-gray-500 disabled:opacity-50"
                                             style={{ fontSize: "16px" }}
                                             onKeyDown={(e) => {
                                                 if (e.key === "Enter" && !e.shiftKey) {
                                                     e.preventDefault()
-                                                    setMessage("")
+                                                    sendMessage()
                                                 }
                                             }}
                                         />
@@ -567,10 +1011,14 @@ export default function IDEApp() {
                                             variant="ghost"
                                             size="sm"
                                             aria-label="Send message"
-                                            className="shrink-0 h-10 w-10 p-0 text-gray-400 hover:text-white"
-                                            onClick={() => setMessage("")}
+                                            disabled={isSending || !message.trim()}
+                                            className="shrink-0 h-10 w-10 p-0 text-gray-400 hover:text-white disabled:opacity-40"
+                                            onClick={sendMessage}
                                         >
-                                            <Send className="w-4 h-4" />
+                                            {isSending
+                                                ? <RefreshCw className="w-4 h-4 animate-spin" />
+                                                : <Send className="w-4 h-4" />
+                                            }
                                         </Button>
                                     </div>
                                 </div>
@@ -580,7 +1028,7 @@ export default function IDEApp() {
                 </div>
             </div>
 
-            {/* ── GitHub Push / PR Modal ── */}
+            {/* GitHub modal */}
             <AnimatePresence>
                 {githubModalOpen && (
                     <motion.div
@@ -602,7 +1050,6 @@ export default function IDEApp() {
                             className="bg-[#161B22] border border-gray-700 rounded-xl w-full max-w-md shadow-2xl overflow-y-auto max-h-[90dvh]"
                             onClick={(e) => e.stopPropagation()}
                         >
-                            {/* Modal Header */}
                             <div className="flex items-center justify-between px-5 py-4 border-b border-gray-700">
                                 <div className="flex items-center gap-2">
                                     <Github className="w-5 h-5 text-white" />
@@ -619,9 +1066,7 @@ export default function IDEApp() {
                                 </Button>
                             </div>
 
-                            {/* Modal Body */}
                             <div className="p-5 space-y-4">
-                                {/* Token */}
                                 <div>
                                     <label className="block text-xs text-gray-400 mb-1.5">GitHub Personal Access Token</label>
                                     <input
@@ -637,7 +1082,6 @@ export default function IDEApp() {
                                     </p>
                                 </div>
 
-                                {/* Owner / Repo */}
                                 <div className="grid grid-cols-2 gap-3">
                                     <div>
                                         <label className="block text-xs text-gray-400 mb-1.5">Owner</label>
@@ -661,7 +1105,6 @@ export default function IDEApp() {
                                     </div>
                                 </div>
 
-                                {/* Branch / Base */}
                                 <div className="grid grid-cols-2 gap-3">
                                     <div>
                                         <label className="block text-xs text-gray-400 mb-1.5">Push to branch</label>
@@ -685,7 +1128,6 @@ export default function IDEApp() {
                                     </div>
                                 </div>
 
-                                {/* File path */}
                                 <div>
                                     <label className="block text-xs text-gray-400 mb-1.5">File path in repo</label>
                                     <input
@@ -697,7 +1139,6 @@ export default function IDEApp() {
                                     />
                                 </div>
 
-                                {/* Commit message */}
                                 <div>
                                     <label className="block text-xs text-gray-400 mb-1.5">Commit message</label>
                                     <input
@@ -709,7 +1150,6 @@ export default function IDEApp() {
                                     />
                                 </div>
 
-                                {/* Create PR checkbox */}
                                 <label className="flex items-center gap-2 cursor-pointer select-none">
                                     <input
                                         type="checkbox"
@@ -723,7 +1163,6 @@ export default function IDEApp() {
                                     </span>
                                 </label>
 
-                                {/* PR fields */}
                                 {githubForm.createPR && (
                                     <div className="space-y-3 pl-3 border-l-2 border-blue-600">
                                         <div>
@@ -749,7 +1188,6 @@ export default function IDEApp() {
                                     </div>
                                 )}
 
-                                {/* Status */}
                                 {githubStatus.state !== "idle" && (
                                     <div
                                         className={[
@@ -780,7 +1218,6 @@ export default function IDEApp() {
                                 )}
                             </div>
 
-                            {/* Modal Footer */}
                             <div className="flex items-center justify-end gap-2 px-5 py-4 border-t border-gray-700">
                                 <Button
                                     variant="ghost"
