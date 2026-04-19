@@ -81,24 +81,27 @@ class TestJwtTokenRoundTrip:
 
     def test_refresh_token_type_validation(self):
         """Refresh token type should be distinguishable from access token"""
-        if 'server.utils.auth_utils' in sys.modules:
-            del sys.modules['server.utils.auth_utils']
+        # Purge ALL server.* modules to prevent MagicMock contamination
+        for mod in list(sys.modules.keys()):
+            if mod.startswith('server.'):
+                sys.modules.pop(mod, None)
 
-        from server.utils.auth_utils import generate_refresh_token, decode_token
+        # Import real database + ALL models (so create_all registers every table)
         from server.middleware.database import db, init_db
+        import server.models  # registers RefreshToken, User, etc with SQLAlchemy
+        from server.utils.auth_utils import generate_refresh_token, decode_token
         from flask import Flask
 
-        # Create test Flask app
         app = Flask(__name__)
         app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///:memory:'
         app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
         init_db(app)
 
         with app.app_context():
-            db.create_all()
+            db.create_all()  # now creates refresh_tokens table
             token = generate_refresh_token(user_id=1, username="bob")
             payload = decode_token(token)
-
             assert payload is not None
             assert payload['type'] == 'refresh'
+            assert payload['type'] != 'access'
             assert payload['type'] != 'access'
