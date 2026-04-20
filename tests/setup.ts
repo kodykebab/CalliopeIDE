@@ -8,3 +8,6 @@ if (typeof globalThis.TextEncoder === 'undefined') {
 if (typeof globalThis.TextDecoder === 'undefined') {
   (globalThis as any).TextDecoder = TextDecoder;
 }
+
+// Mock Canvas API for jsdom
+HTMLCanvasElement.prototype.getContext = jest.fn() as any;
