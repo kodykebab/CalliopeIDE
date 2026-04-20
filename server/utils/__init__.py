@@ -24,6 +24,7 @@ from .agent_validators import (
 )
 from .secure_execution import (
     secure_execute,
+    docker_run_command,
     SecurityError,
     ExecutionTimeoutError,
     MemoryLimitError
@@ -47,6 +48,7 @@ __all__ = [
     'sanitize_agent_input',
     'is_dangerous_command',
     'secure_execute',
+    'docker_run_command',
     'SecurityError',
     'ExecutionTimeoutError',
     'MemoryLimitError',

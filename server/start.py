@@ -23,7 +23,7 @@ from server.routes.project_routes import project_bp
 from server.routes.soroban_deploy import soroban_deploy_bp
 from server.routes.soroban_invoke import soroban_invoke_bp
 from server.routes.soroban_wallet import wallet_bp
-from server.utils import token_required, secure_execute, SecurityError
+from server.utils import token_required, secure_execute, docker_run_command, SecurityError, get_docker_client, DOCKER_AVAILABLE, SANDBOX_IMAGE
 from server.utils.db_utils import create_session_for_user, add_chat_message, ensure_database_directory, get_database_stats
 from server.utils.monitoring import setup_logging, init_sentry, monitor_endpoint, get_monitoring_stats
  
@@ -129,12 +129,46 @@ def create_session(current_user):
     port = find_free_port()
 
     # Start the agent process
-    subprocess.Popen(
-        ["python3", "agent.py", str(port)],
-        cwd=inst,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL
-    )
+    if DOCKER_AVAILABLE:
+        try:
+            client = get_docker_client()
+            # Launch agent in a container
+            # Note: The agent needs networking to reach Gemini API
+            container = client.containers.run(
+                image="calliope-backend", # Use the backend image which has all deps
+                command=["python3", "agent.py", str(port)],
+                detach=True,
+                name=f"agent_{idx}_{user_id}",
+                ports={f"{port}/tcp": port},
+                environment={
+                    "GEMINI_API_KEY": os.getenv("GEMINI_API_KEY"),
+                    "CORS_ORIGINS": os.getenv("CORS_ORIGINS", "*"),
+                    "APP_ENV": os.getenv("APP_ENV", "production")
+                },
+                volumes={
+                    os.path.abspath(inst): {'bind': '/app', 'mode': 'rw'},
+                    '/var/run/docker.sock': {'bind': '/var/run/docker.sock', 'mode': 'rw'}
+                },
+                working_dir="/app",
+                restart_policy={"Name": "on-failure", "MaximumRetryCount": 3}
+            )
+            app.logger.info(f"Started agent container {container.id} for session {idx}")
+        except Exception as e:
+            app.logger.error(f"Failed to start agent container: {str(e)}. Falling back to subprocess.")
+            # Fallback
+            subprocess.Popen(
+                ["python3", "agent.py", str(port)],
+                cwd=inst,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL
+            )
+    else:
+        subprocess.Popen(
+            ["python3", "agent.py", str(port)],
+            cwd=inst,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL
+        )
 
     try:
         # Create session in database

@@ -16,6 +16,8 @@ import threading
 import time
 from typing import Dict, Any, List, Optional
 import logging
+import docker
+from docker.errors import DockerException, ImageNotFound, APIError
 
 # Try to import resource module (Unix only)
 try:
@@ -179,6 +181,180 @@ def create_restricted_environment() -> Dict[str, str]:
     return env
 
 
+# Initialize Docker client
+try:
+    docker_client = docker.from_env()
+    DOCKER_AVAILABLE = True
+except Exception:
+    docker_client = None
+    DOCKER_AVAILABLE = False
+    logger.warning("Docker daemon not found. Container-based isolation will not be available.")
+
+# Sandbox image configuration
+SANDBOX_IMAGE = "calliope-sandbox"
+
+def get_docker_client():
+    """Get or initialize Docker client."""
+    global docker_client, DOCKER_AVAILABLE
+    if docker_client is None:
+        try:
+            docker_client = docker.from_env()
+            DOCKER_AVAILABLE = True
+        except Exception:
+            DOCKER_AVAILABLE = False
+    return docker_client
+
+def docker_execute(code: str, timeout: int = EXECUTION_TIMEOUT) -> Dict[str, Any]:
+    """
+    Execute user code inside an isolated Docker container.
+    """
+    client = get_docker_client()
+    if not client:
+        return None  # Fallback to subprocess
+
+    start_time = time.time()
+    container = None
+    
+    try:
+        # Security validation still applies
+        validate_code_safety(code)
+        
+        # Prepare the script content
+        # We don't need restricted_import anymore as Docker provides better isolation,
+        # but we can keep it as an extra layer if desired.
+        script_content = code
+        
+        # Create ephemeral container
+        container = client.containers.run(
+            image=SANDBOX_IMAGE,
+            command=["python3", "-c", script_content],
+            mem_limit=f"{MAX_MEMORY_MB}m",
+            cpu_quota=50000,  # 50% of one CPU
+            network_disabled=True,
+            detach=True,
+            remove=False, # We'll remove it after getting logs
+            working_dir="/workspace",
+            user="sandboxuser"
+        )
+        
+        # Wait for completion with timeout
+        try:
+            result = container.wait(timeout=timeout)
+            exit_code = result.get('StatusCode', 0)
+        except Exception:
+            # Timeout or other error during wait
+            container.kill()
+            return {
+                'status': 'timeout',
+                'output': '',
+                'error': f'Execution time limit exceeded ({timeout}s)',
+                'execution_time': timeout
+            }
+        
+        # Get logs
+        stdout = container.logs(stdout=True, stderr=False).decode('utf-8', errors='replace')
+        stderr = container.logs(stdout=False, stderr=True).decode('utf-8', errors='replace')
+        
+        execution_time = time.time() - start_time
+        
+        # Truncate output if needed
+        if len(stdout) > MAX_OUTPUT_SIZE:
+            stdout = stdout[:MAX_OUTPUT_SIZE] + '\n... (output truncated)'
+        
+        if len(stderr) > MAX_OUTPUT_SIZE:
+            stderr = stderr[:MAX_OUTPUT_SIZE] + '\n... (error output truncated)'
+            
+        status = 'success' if exit_code == 0 else 'error'
+        if exit_code == 137: # Out of memory or killed
+             status = 'memory_error'
+             stderr = 'Memory limit exceeded or process killed'
+             
+        return {
+            'status': status,
+            'output': stdout,
+            'error': stderr,
+            'execution_time': execution_time
+        }
+        
+    except ImageNotFound:
+        logger.error(f"Sandbox image {SANDBOX_IMAGE} not found.")
+        return None
+    except Exception as e:
+        logger.error(f"Docker execution failed: {str(e)}")
+        return None
+    finally:
+        if container:
+            try:
+                container.remove(force=True)
+            except Exception:
+                pass
+
+def docker_run_command(cmd: str, workdir: str = None, timeout: int = 300) -> Dict[str, Any]:
+    """
+    Execute a shell command inside an isolated Docker container.
+    """
+    client = get_docker_client()
+    if not client:
+        return None
+
+    start_time = time.time()
+    container = None
+    
+    try:
+        volumes = {}
+        if workdir:
+            # Mount the host workdir to /workspace in container
+            abs_workdir = os.path.abspath(workdir)
+            volumes[abs_workdir] = {'bind': '/workspace', 'mode': 'rw'}
+        
+        # Create ephemeral container
+        container = client.containers.run(
+            image=SANDBOX_IMAGE,
+            command=["sh", "-c", cmd],
+            mem_limit=f"{MAX_MEMORY_MB * 4}m", # Higher limit for commands like build
+            cpu_quota=100000, # 100% of one CPU
+            network_disabled=True,
+            detach=True,
+            remove=False,
+            volumes=volumes,
+            working_dir="/workspace",
+            user="root" # Many tools need root or it depends on how the image is set up
+        )
+        
+        # Wait for completion
+        try:
+            result = container.wait(timeout=timeout)
+            exit_code = result.get('StatusCode', 0)
+        except Exception:
+            container.kill()
+            return {
+                'status': 'timeout',
+                'output': '',
+                'error': f'Command timed out ({timeout}s)',
+                'exit_code': -1
+            }
+        
+        stdout = container.logs(stdout=True, stderr=False).decode('utf-8', errors='replace')
+        stderr = container.logs(stdout=False, stderr=True).decode('utf-8', errors='replace')
+        
+        return {
+            'status': 'success' if exit_code == 0 else 'error',
+            'output': stdout,
+            'error': stderr,
+            'exit_code': exit_code,
+            'execution_time': time.time() - start_time
+        }
+        
+    except Exception as e:
+        logger.error(f"Docker command execution failed: {str(e)}")
+        return None
+    finally:
+        if container:
+            try:
+                container.remove(force=True)
+            except Exception:
+                pass
+
 def secure_execute(code: str, timeout: int = EXECUTION_TIMEOUT) -> Dict[str, Any]:
     """
     Execute user code in a secure sandboxed environment.
@@ -197,6 +373,13 @@ def secure_execute(code: str, timeout: int = EXECUTION_TIMEOUT) -> Dict[str, Any
     start_time = time.time()
     
     try:
+        # Try Docker execution first
+        if DOCKER_AVAILABLE:
+            result = docker_execute(code, timeout)
+            if result:
+                return result
+        
+        # Fallback to subprocess execution (original logic)
         # Input validation
         if not isinstance(code, str):
             return {
@@ -407,13 +590,15 @@ def test_security_measures():
     
     print("🔒 Testing Security Measures")
     print("=" * 50)
+    print(f"Docker Available: {DOCKER_AVAILABLE}")
+    print("-" * 50)
     
     for code, description in test_cases:
         print(f"\nTest: {description}")
         print(f"Code: {code[:50]}{'...' if len(code) > 50 else ''}")
-        result = secure_execute(code, timeout=2)
+        result = secure_execute(code, timeout=5)
         print(f"Status: {result['status']}")
-        if result['error']:
+        if result.get('error'):
             print(f"Error: {result['error'][:100]}{'...' if len(result['error']) > 100 else ''}")
         print("-" * 30)
 

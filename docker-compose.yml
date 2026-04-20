@@ -43,6 +43,7 @@ services:
       - DATABASE_URL=sqlite:///data/calliope.db
     volumes:
       - backend-data:/app/data
+      - /var/run/docker.sock:/var/run/docker.sock
     healthcheck:
       test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:5000/health"]
       interval: 30s

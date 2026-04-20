@@ -176,13 +176,31 @@ def execute_command(cmd: str, ctx=None) -> str:
         return "ERROR: Command too long (max 1000 characters)"
 
     try:
+        from server.utils import docker_run_command
+        # Try running in Docker first
+        result = docker_run_command(cmd, workdir=os.getcwd(), timeout=300)
+        
+        if result:
+            if result['status'] == 'success':
+                return result['output']
+            elif result['status'] == 'timeout':
+                return "COMMAND TIMED OUT (300s limit)"
+            else:
+                return f"ERROR: {result['error']}\nOUTPUT: {result['output']}"
+    except ImportError:
+        pass
+    except Exception as e:
+        if ctx: ctx_print(ctx, f"Docker execution failed, falling back to subprocess: {str(e)}")
+
+    # Fallback to standard subprocess
+    try:
         result = subprocess.run(cmd, shell=True, text=True,
                                 capture_output=True, timeout=300)
         if result.returncode != 0 and result.stderr:
             return f"ERROR: {result.stderr}\nOUTPUT: {result.stdout}"
         return result.stdout
     except subprocess.TimeoutExpired:
-        return "COMMAND TIMED OUT (30s limit)"
+        return "COMMAND TIMED OUT (300s limit)"
     except Exception as e:
         return f"ERROR: {str(e)}"
 
