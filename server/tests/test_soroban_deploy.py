@@ -194,4 +194,5 @@ class TestListDeployments:
 
     def test_resolve_wasm_path_valid(self):
         result = m._resolve_wasm_path("target/release/c.wasm", "/tmp/instance1_user1")
-        assert result == "/tmp/instance1_user1/target/release/c.wasm"
+        expected = os.path.abspath(os.path.join("/tmp/instance1_user1", "target/release/c.wasm"))
+        assert result == expected
