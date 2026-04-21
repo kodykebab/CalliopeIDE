@@ -3,6 +3,7 @@
  * Catches JavaScript errors anywhere in the component tree and displays a fallback UI
  */
 import React, { Component, ErrorInfo, ReactNode } from 'react';
+import { captureException } from '@/lib/monitoring';
 
 interface Props {
   children: ReactNode;
@@ -40,8 +41,12 @@ export class ErrorBoundary extends Component<Props, State> {
       errorInfo
     });
 
-    // TODO: Send to error tracking service (e.g., Sentry)
-    // trackError(error, { componentStack: errorInfo.componentStack });
+    // Send to error tracking service (Sentry)
+    captureException(error, {
+      componentStack: errorInfo.componentStack,
+      errorBoundary: true,
+      componentName: this.constructor.name
+    });
   }
 
   handleReset = () => {
