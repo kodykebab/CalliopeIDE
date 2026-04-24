@@ -26,6 +26,7 @@ import {
 import { Button } from "@/components/ui/button"
 import { getPublicKey, signTransaction, isConnected } from "@stellar/freighter-api"
 import ContractInteraction from "@/components/ContractInteraction"
+import FileExplorer from "@/components/FileExplorer"
 
 // ── Config ─────────────────────────────────────────────────────────────────────
 const BACKEND_URL = process.env.NEXT_PUBLIC_BACKEND_URL || "http://localhost:5000"
@@ -760,28 +761,12 @@ export default function IDEApp() {
 
                         <div className="flex-1 overflow-y-auto">
                             {sidebarTab === "explorer" && (
-                                <div className="p-3 space-y-0.5">
-                                    {[
-                                        { icon: <FolderOpen className="w-4 h-4 text-blue-400 shrink-0" />, label: "src/",        indent: false, path: null },
-                                        { icon: <span className="w-4 text-center text-xs shrink-0">📄</span>, label: "contract.rs", indent: true,  path: "./workspace/src/contract.rs" },
-                                        { icon: <span className="w-4 text-center text-xs shrink-0">📄</span>, label: "lib.rs",      indent: true,  path: "./workspace/src/lib.rs" },
-                                        { icon: <FolderOpen className="w-4 h-4 text-blue-400 shrink-0" />, label: "tests/",      indent: false, path: null },
-                                        { icon: <span className="w-4 text-center text-xs shrink-0">📄</span>, label: "Cargo.toml", indent: false, path: "./workspace/Cargo.toml" },
-                                    ].map(({ icon, label, indent, path }) => (
-                                        <div
-                                            key={label}
-                                            onClick={() => path && handleFileSelect(path)}
-                                            className={[
-                                                "flex items-center gap-2 px-2 py-1.5 rounded hover:bg-gray-700 cursor-pointer transition-colors",
-                                                indent ? "ml-4" : "",
-                                                activeFile === path && path ? "bg-gray-700 border-l-2 border-blue-400" : "",
-                                            ].join(" ")}
-                                        >
-                                            {icon}
-                                            <span className="text-sm truncate">{label}</span>
-                                        </div>
-                                    ))}
-                                </div>
+                                <FileExplorer
+                                    projectId={projectId}
+                                    onFileSelect={(node) => setActiveFile(node.path)}
+                                    selectedPath={activeFile}
+                                    className="h-full"
+                                />
                             )}
 
                             {sidebarTab === "contract" && (

@@ -500,6 +500,85 @@ def read_project_file(current_user, project_id):
         return jsonify({'success': False, 'error': 'An error occurred while reading the file'}), 500
 
 
+@project_bp.route('/<int:project_id>/files', methods=['GET'])
+@token_required
+def get_project_files(current_user, project_id):
+    """
+    Get the complete file tree structure for a project.
+    Returns a hierarchical tree of all files and folders.
+    """
+    try:
+        project = ProjectMetadata.query.filter_by(
+            id=project_id, user_id=current_user.id, is_active=True
+        ).first()
+
+        if not project:
+            return jsonify({'success': False, 'error': 'Project not found'}), 404
+
+        if not project.project_path:
+            return jsonify({'success': False, 'error': 'Project has no path configured'}), 400
+
+        import os
+        from pathlib import Path
+
+        def build_tree(path, base_path):
+            """Recursively build file tree structure"""
+            try:
+                path_obj = Path(path)
+                if not path_obj.exists():
+                    return None
+
+                node = {
+                    'name': path_obj.name,
+                    'path': str(path_obj),
+                    'isDirectory': path_obj.is_dir(),
+                    'children': []
+                }
+
+                if path_obj.is_dir():
+                    try:
+                        children = []
+                        for item in sorted(path_obj.iterdir()):
+                            # Skip hidden files and directories
+                            if item.name.startswith('.'):
+                                continue
+                            
+                            child_tree = build_tree(str(item), base_path)
+                            if child_tree:
+                                children.append(child_tree)
+                        
+                        node['children'] = children
+                    except PermissionError:
+                        # Handle directories we can't read
+                        pass
+
+                return node
+            except Exception as e:
+                logger.warning(f"Error building tree for {path}: {e}")
+                return None
+
+        # Build tree starting from project path
+        project_path = Path(project.project_path)
+        if not project_path.exists():
+            return jsonify({'success': False, 'error': 'Project directory does not exist'}), 404
+
+        tree = build_tree(str(project_path), str(project_path))
+        
+        return jsonify({
+            'success': True,
+            'tree': tree
+        }), 200
+
+    except Exception as e:
+        logger.exception("Get project files error")
+        capture_exception(e, {
+            'route': 'project.get_project_files',
+            'user_id': current_user.id,
+            'project_id': project_id,
+        })
+        return jsonify({'success': False, 'error': 'An error occurred while fetching files'}), 500
+
+
 # ── Helper ────────────────────────────────────────────────────────────────────
 
 def _relative_path(absolute: str, base: str) -> str:
