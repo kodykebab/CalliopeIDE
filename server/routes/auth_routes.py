@@ -7,7 +7,8 @@ from server.utils.auth_utils import (
     generate_refresh_token,
     decode_token,
     token_required,
-    revoke_refresh_token
+    revoke_refresh_token,
+    revoke_all_user_refresh_tokens,
 )
 from server.utils.validators import (
     validate_registration_data,
@@ -173,8 +174,10 @@ def logout(current_user):
             return jsonify({'success': False, 'error': 'Refresh token is required'}), 400
         
         token = data['refresh_token']
-        revoke_refresh_token(token)
-        
+        # Scope the revocation to the authenticated user so a caller cannot
+        # revoke a refresh token that belongs to a different user.
+        revoke_refresh_token(token, user_id=current_user.id)
+
         return jsonify({'success': True, 'message': 'Logout successful'}), 200
         
     except Exception as e:
@@ -250,8 +253,23 @@ def change_password(current_user):
         
         current_user.set_password(new_password)
         db.session.commit()
-        
-        return jsonify({'success': True, 'message': 'Password changed successfully'}), 200
+
+        # Invalidate every existing refresh token so that any previously-issued
+        # session (including ones an attacker may have exfiltrated) can no
+        # longer be used to mint new access tokens. The caller must log in
+        # again on other devices after changing their password.
+        revoked_count = revoke_all_user_refresh_tokens(current_user.id)
+        logger.info(
+            "Password changed for user_id=%s; revoked %s refresh tokens",
+            current_user.id,
+            revoked_count,
+        )
+
+        return jsonify({
+            'success': True,
+            'message': 'Password changed successfully. Please log in again on your other devices.',
+            'revoked_sessions': revoked_count,
+        }), 200
         
     except Exception as e:
         db.session.rollback()

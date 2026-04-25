@@ -3,6 +3,8 @@
 import { useState, useEffect, useCallback, useRef } from "react"
 import { useRouter } from "next/router"
 import { motion, AnimatePresence } from "framer-motion"
+import ReactMarkdown from "react-markdown"
+
 import {
     Menu,
     X,
@@ -136,6 +138,8 @@ export default function IDEApp() {
     // ── Editor / project state ─────────────────────────────────────────────────
     const [activeFile, setActiveFile] = useState(null)  // absolute path string
     const [projectId, setProjectId]   = useState(null)  // from auth session
+    const [fileContent, setFileContent] = useState(CODE_LINES.map(l => l.code).join("\n"))
+    const [saveStatus, setSaveStatus] = useState("idle") // "idle" | "saving" | "saved" | "error"
 
     // Monaco multi-file editor state (Issue #51)
     const [openFiles, setOpenFiles] = useState([
@@ -241,6 +245,33 @@ export default function IDEApp() {
                 return
             }
             setUser(userData)
+            
+            // Auto-setup or retrieve default project workspace
+            try {
+                const projRes = await fetch(`${BACKEND_URL}/api/projects/list`, {
+                    headers: { Authorization: `Bearer ${token}` }
+                })
+                const projData = await projRes.json()
+                if (projData.success && projData.projects.length > 0) {
+                    setProjectId(projData.projects[0].id)
+                } else {
+                    const createRes = await fetch(`${BACKEND_URL}/api/projects/`, {
+                        method: "POST",
+                        headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+                        body: JSON.stringify({
+                            project_name: "Default Workspace",
+                            project_path: "./workspace"
+                        })
+                    })
+                    const createData = await createRes.json()
+                    if (createData.success) {
+                        setProjectId(createData.project.id)
+                    }
+                }
+            } catch (err) {
+                console.warn("Failed to auto-setup project", err)
+            }
+            
             setAuthLoading(false)
         }
         init()
@@ -342,6 +373,28 @@ export default function IDEApp() {
         return () => clearTimeout(contextDebounceRef.current)
     }, [activeFile, fetchContext])
 
+    // Fetch file content when activeFile changes
+    useEffect(() => {
+        if (!activeFile || !projectId) return
+        const fetchContent = async () => {
+            const token = getAuthToken()
+            if (!token) return
+            try {
+                const res = await fetch(`${BACKEND_URL}/api/projects/${projectId}/files/read?file_path=${encodeURIComponent(activeFile)}`, {
+                    headers: { Authorization: `Bearer ${token}` }
+                })
+                if (res.ok) {
+                    const data = await res.json()
+                    if (data.success && data.content !== undefined) {
+                        setFileContent(data.content)
+                        setSaveStatus("idle")
+                    }
+                }
+            } catch (err) {}
+        }
+        fetchContent()
+    }, [activeFile, projectId])
+
     // ── File selection handler ─────────────────────────────────────────────────
     const handleFileSelect = (filePath) => {
         setActiveFile(filePath)
@@ -405,10 +458,44 @@ export default function IDEApp() {
         } catch (_) {}
     }
 
+    const saveDebounceRef = useRef(null)
+    // Autosave when fileContent changes
+    useEffect(() => {
+        if (!activeFile || !projectId) return
+        
+        clearTimeout(saveDebounceRef.current)
+        saveDebounceRef.current = setTimeout(async () => {
+            setSaveStatus("saving")
+            const token = getAuthToken()
+            if (!token) return
+            try {
+                const res = await fetch(`${BACKEND_URL}/api/projects/${projectId}/files/save`, {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+                    body: JSON.stringify({ file_path: activeFile, content: fileContent })
+                })
+                if (res.ok) {
+                    const data = await res.json()
+                    if (data.success) {
+                        setSaveStatus("saved")
+                        handleSave()
+                    } else {
+                        setSaveStatus("error")
+                    }
+                } else {
+                    setSaveStatus("error")
+                }
+            } catch (err) {
+                setSaveStatus("error")
+            }
+        }, 1500)
+        return () => clearTimeout(saveDebounceRef.current)
+    }, [fileContent, activeFile, projectId])
+
     // ── GitHub push handler ────────────────────────────────────────────────────
     const handleGithubSubmit = async () => {
         setGithubStatus({ state: "pushing", message: "Pushing to GitHub…", links: null })
-        const code = CODE_LINES.map((l) => l.code).join("\n")
+        const code = fileContent
         try {
             const pushRes = await fetch("/api/github", {
                 method: "POST",
@@ -614,7 +701,7 @@ export default function IDEApp() {
                     try {
                         const event = JSON.parse(line.slice(6))
                         if (event.type === "output") {
-                            assistantBuffer += event.data + "\n"
+                            assistantBuffer += event.data
                             // Update the last assistant message in place
                             setChatHistory((prev) => {
                                 const updated = [...prev]
@@ -749,10 +836,10 @@ export default function IDEApp() {
                                 <div className="p-3 space-y-0.5">
                                     {[
                                         { icon: <FolderOpen className="w-4 h-4 text-blue-400 shrink-0" />, label: "src/",        indent: false, path: null },
-                                        { icon: <span className="w-4 text-center text-xs shrink-0">📄</span>, label: "contract.rs", indent: true,  path: "/workspace/src/contract.rs" },
-                                        { icon: <span className="w-4 text-center text-xs shrink-0">📄</span>, label: "lib.rs",      indent: true,  path: "/workspace/src/lib.rs" },
+                                        { icon: <span className="w-4 text-center text-xs shrink-0">📄</span>, label: "contract.rs", indent: true,  path: "./workspace/src/contract.rs" },
+                                        { icon: <span className="w-4 text-center text-xs shrink-0">📄</span>, label: "lib.rs",      indent: true,  path: "./workspace/src/lib.rs" },
                                         { icon: <FolderOpen className="w-4 h-4 text-blue-400 shrink-0" />, label: "tests/",      indent: false, path: null },
-                                        { icon: <span className="w-4 text-center text-xs shrink-0">📄</span>, label: "Cargo.toml", indent: false, path: "/workspace/Cargo.toml" },
+                                        { icon: <span className="w-4 text-center text-xs shrink-0">📄</span>, label: "Cargo.toml", indent: false, path: "./workspace/Cargo.toml" },
                                     ].map(({ icon, label, indent, path }) => (
                                         <div
                                             key={label}
@@ -833,6 +920,11 @@ export default function IDEApp() {
                     <div className="flex-1" />
 
                     <div className="flex items-center gap-1 shrink-0">
+                        <div className="hidden sm:inline-flex items-center px-2 text-xs text-gray-400">
+                            {saveStatus === "saving" && <span className="animate-pulse">Saving...</span>}
+                            {saveStatus === "saved" && <span className="text-green-500">Saved</span>}
+                            {saveStatus === "error" && <span className="text-red-500">Error saving</span>}
+                        </div>
                         {/* Save — desktop label, calls handleSave for context invalidation */}
                         <Button
                             variant="ghost"
@@ -1036,13 +1128,19 @@ export default function IDEApp() {
                                     {chatHistory.map((msg, idx) => (
                                         <div
                                             key={idx}
-                                            className={`p-3 rounded-lg text-sm whitespace-pre-wrap break-words ${
+                                            className={`p-3 rounded-lg text-sm break-words ${
                                                 msg.role === "user"
-                                                    ? "bg-blue-600 ml-auto max-w-[85%]"
-                                                    : "bg-[#0D1117] max-w-[90%]"
+                                                    ? "bg-blue-600 ml-auto max-w-[85%] whitespace-pre-wrap"
+                                                    : "bg-[#0D1117] max-w-full text-gray-200"
                                             }`}
                                         >
-                                            <p className="leading-relaxed">{msg.content}</p>
+                                            {msg.role === "user" ? (
+                                                <p className="leading-relaxed">{msg.content}</p>
+                                            ) : (
+                                                <div className="react-markdown-wrapper space-y-2">
+                                                    <ReactMarkdown>{msg.content}</ReactMarkdown>
+                                                </div>
+                                            )}
                                         </div>
                                     ))}
                                     <div ref={chatBottomRef} />

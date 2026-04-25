@@ -119,11 +119,39 @@ def token_required(f):
     return decorated
 
 
-def revoke_refresh_token(token):
-    """Revoke a refresh token"""
-    refresh_token = RefreshToken.query.filter_by(token=token).first()
+def revoke_refresh_token(token, user_id=None):
+    """Revoke a refresh token.
+
+    When ``user_id`` is provided, the token is only revoked when it belongs to
+    that user. This prevents a user with a valid access token from revoking
+    refresh tokens belonging to a different user (e.g. causing a denial of
+    service if a token string is leaked).
+
+    Returns True if a matching token was revoked, False otherwise.
+    """
+    query = RefreshToken.query.filter_by(token=token)
+    if user_id is not None:
+        query = query.filter_by(user_id=user_id)
+    refresh_token = query.first()
     if refresh_token:
         refresh_token.is_revoked = True
         db.session.commit()
         return True
     return False
+
+
+def revoke_all_user_refresh_tokens(user_id):
+    """Revoke every active refresh token for the given user.
+
+    Intended to be called after security-sensitive events (password change,
+    account takeover suspicion, admin action) so that previously-issued
+    refresh tokens can no longer be exchanged for new access tokens.
+
+    Returns the number of tokens that were revoked.
+    """
+    count = RefreshToken.query.filter_by(
+        user_id=user_id,
+        is_revoked=False,
+    ).update({'is_revoked': True})
+    db.session.commit()
+    return count
