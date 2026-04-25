@@ -23,7 +23,7 @@ class TestHardcodedSecretKeyGuard:
         """start.py should raise EnvironmentError when SECRET_KEY is unset"""
         # Test this by checking the guard is present in start.py
         start_path = os.path.join(os.path.dirname(__file__), '..', 'start.py')
-        with open(start_path, 'r') as f:
+        with open(start_path, 'r', encoding='utf-8') as f:
             content = f.read()
             assert '_flask_secret = os.getenv(\'SECRET_KEY\')' in content
             assert 'if not _flask_secret:' in content

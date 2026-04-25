@@ -23,6 +23,7 @@
     "@heroui/switch": "2.2.15",
     "@heroui/system": "2.4.13",
     "@heroui/theme": "2.4.13",
+    "@monaco-editor/react": "^4.7.0",
     "@radix-ui/react-slot": "^1.2.0",
     "@react-aria/visually-hidden": "3.8.21",
     "@react-spring/web": "^9.7.5",
