@@ -500,7 +500,96 @@ def read_project_file(current_user, project_id):
         return jsonify({'success': False, 'error': 'An error occurred while reading the file'}), 500
 
 
+@project_bp.route('/<int:project_id>/files/tree', methods=['GET'])
+@token_required
+def get_project_tree(current_user, project_id):
+    """
+    Get the directory tree structure of the project.
+    """
+    try:
+        project = ProjectMetadata.query.filter_by(
+            id=project_id, user_id=current_user.id, is_active=True
+        ).first()
+
+        if not project:
+            return jsonify({'success': False, 'error': 'Project not found'}), 404
+
+        if not project.project_path:
+            return jsonify({'success': False, 'error': 'Project has no path configured'}), 400
+
+        import os
+        abs_project = os.path.realpath(project.project_path)
+        
+        if not os.path.exists(abs_project):
+            return jsonify({'success': False, 'error': 'Project directory does not exist on disk'}), 404
+
+        tree = _get_directory_tree(abs_project, abs_project)
+
+        return jsonify({
+            'success': True,
+            'tree': tree
+        }), 200
+
+    except Exception as e:
+        logger.exception("Get project tree error")
+        capture_exception(e, {
+            'route': 'project.get_project_tree',
+            'user_id': current_user.id,
+            'project_id': project_id,
+        })
+        return jsonify({'success': False, 'error': 'An error occurred while building the file tree'}), 500
+
+
 # ── Helper ────────────────────────────────────────────────────────────────────
+
+def _get_directory_tree(path: str, base_path: str) -> dict:
+    """
+    Recursively build a directory tree.
+    """
+    import os
+    
+    # Same skip list as context_builder.py
+    skip_dirs = {"node_modules", ".git", "target", "__pycache__", ".next",
+                 "dist", "build", ".venv", "venv"}
+    
+    name = os.path.basename(path)
+    if not name and path == base_path:
+        name = os.path.basename(os.path.normpath(path))
+    
+    relative_path = os.path.relpath(path, base_path)
+    if relative_path == ".":
+        relative_path = ""
+
+    item = {
+        "name": name,
+        "path": path,
+        "relative_path": relative_path,
+        "is_dir": os.path.isdir(path)
+    }
+
+    if item["is_dir"]:
+        children = []
+        try:
+            # Sort: directories first, then alphabetically
+            entries = os.listdir(path)
+            entries.sort(key=lambda x: (not os.path.isdir(os.path.join(path, x)), x.lower()))
+            
+            for entry in entries:
+                if entry in skip_dirs:
+                    continue
+                
+                # Optionally skip hidden files (except common ones)
+                if entry.startswith(".") and entry not in (".env", ".gitignore", ".eslintrc.json"):
+                    continue
+                    
+                child_path = os.path.join(path, entry)
+                children.append(_get_directory_tree(child_path, base_path))
+        except OSError:
+            pass
+        item["children"] = children
+    
+    return item
+
 
 def _relative_path(absolute: str, base: str) -> str:
     import os
