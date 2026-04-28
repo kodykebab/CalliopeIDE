@@ -228,6 +228,7 @@ class TestUpsertOAuthUser:
     from server.routes.oauth_routes import _upsert_oauth_user
 
     def test_creates_new_user(self, client):
+        from server.models.user import User
         from server.routes.oauth_routes import _upsert_oauth_user
         with app.app_context():
             user = _upsert_oauth_user(
@@ -242,7 +243,7 @@ class TestUpsertOAuthUser:
             assert user.is_verified is True
 
     def test_links_existing_password_user(self, client):
-        from server.models import User
+        from server.models.user import User
         from server.routes.oauth_routes import _upsert_oauth_user
         with app.app_context():
             existing = User(email='existing@example.com',
@@ -271,7 +272,7 @@ class TestUpsertOAuthUser:
             assert first.id == second.id
 
     def test_username_collision_resolved(self, client):
-        from server.models import User
+        from server.models.user import User
         from server.routes.oauth_routes import _upsert_oauth_user
         with app.app_context():
             # Plant a user whose username matches the derived one

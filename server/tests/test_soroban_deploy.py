@@ -17,16 +17,14 @@ def _passthrough(f):
 
 _auth_stub = MagicMock()
 _auth_stub.token_required = _passthrough
-sys.modules["server.utils.auth_utils"] = _auth_stub
-sys.modules["server.models"] = MagicMock()
-sys.modules["server.utils.monitoring"] = MagicMock()
+with patch.dict("sys.modules", {
+    "server.utils.auth_utils": _auth_stub,
+    "server.models": MagicMock(),
+    "server.utils.monitoring": MagicMock()
+}):
+    import server.routes.soroban_deploy as m
+    deploy_bp = m.soroban_deploy_bp
 
-import server.routes.soroban_deploy as m
-deploy_bp = m.soroban_deploy_bp
-
-# Clean up stubs immediately
-for _mod in ["server.utils.auth_utils", "server.models", "server.utils.monitoring"]:
-    sys.modules.pop(_mod, None)
 
 from flask import Flask
 
@@ -193,8 +191,7 @@ class TestListDeployments:
         assert result is None
 
     def test_resolve_wasm_path_valid(self):
+        result = m._resolve_wasm_path("target/release/c.wasm", "/tmp/instance1_user1")
         import os
-        base_dir = "/tmp/instance1_user1"
-        result = m._resolve_wasm_path("target/release/c.wasm", base_dir)
-        expected = os.path.abspath(os.path.join(base_dir, "target/release/c.wasm"))
-        assert result == expected
+        expected = os.path.abspath(os.path.join("/tmp/instance1_user1", "target/release/c.wasm"))
+        assert os.path.normpath(result) == os.path.normpath(expected)

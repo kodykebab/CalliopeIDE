@@ -690,6 +690,9 @@ class TestProjectRoutes(unittest.TestCase):
 
         pr = _reload_by_path("server.project_routes", _ROUTES_FILE)
 
+        for name in stubs.keys():
+            sys.modules.pop(name, None)
+
         app = Flask(__name__)
         app.config["TESTING"] = True
         app.register_blueprint(pr.project_bp)
@@ -751,9 +754,7 @@ class TestProjectRoutes(unittest.TestCase):
         self.assertEqual(resp.status_code, 400)
 
     def test_context_endpoint_missing_project_is_404(self):
-        app, _, _ = self._build_app()
-        sys.modules["server.models"].ProjectMetadata.query\
-            .filter_by.return_value.first.return_value = None
+        app, _, _ = self._build_app(fake_project=False)
         with app.test_client() as c:
             resp = c.post("/api/projects/99/context",
                           json={"current_file_path": self.paths["lib"]})

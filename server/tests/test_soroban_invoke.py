@@ -24,14 +24,13 @@ def _passthrough(f):
 
 _auth_stub = MagicMock()
 _auth_stub.token_required = _passthrough
-sys.modules["server.utils.auth_utils"] = _auth_stub
-sys.modules["server.models"] = MagicMock()
-sys.modules["server.utils.monitoring"] = MagicMock()
+with patch.dict("sys.modules", {
+    "server.utils.auth_utils": _auth_stub,
+    "server.models": MagicMock(),
+    "server.utils.monitoring": MagicMock()
+}):
+    import server.routes.soroban_invoke as m  # noqa: E402
 
-import server.routes.soroban_invoke as m  # noqa: E402
-
-for _mod in ["server.utils.auth_utils", "server.models", "server.utils.monitoring"]:
-    sys.modules.pop(_mod, None)
 
 from flask import Flask  # noqa: E402
 

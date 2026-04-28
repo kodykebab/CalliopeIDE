@@ -1,6 +1,6 @@
 """Tests for server/routes/soroban_routes.py"""
 import pytest, os, subprocess, sys
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 def _passthrough(f):
     import functools
@@ -12,15 +12,13 @@ def _passthrough(f):
 
 _auth_stub = MagicMock()
 _auth_stub.token_required = _passthrough
-sys.modules["server.utils.auth_utils"] = _auth_stub
-sys.modules["server.models"] = MagicMock()
-sys.modules["server.utils.monitoring"] = MagicMock()
+with patch.dict("sys.modules", {
+    "server.utils.auth_utils": _auth_stub,
+    "server.models": MagicMock(),
+    "server.utils.monitoring": MagicMock()
+}):
+    import server.routes.soroban_routes as m
 
-import server.routes.soroban_routes as m
-
-# Restore sys.modules immediately after import to avoid contaminating other test modules
-for _mod in ["server.utils.auth_utils", "server.models", "server.utils.monitoring"]:
-    sys.modules.pop(_mod, None)
 
 
 soroban_bp = m.soroban_bp

@@ -35,7 +35,9 @@ def register():
         
         is_valid, errors = validate_registration_data(data)
         if not is_valid:
-            return jsonify({'success': False, 'errors': errors}), 400
+            # Return the first error message for simplicity on the frontend
+            first_error = next(iter(errors.values())) if errors else "Validation failed"
+            return jsonify({'success': False, 'error': first_error, 'errors': errors}), 400
         
         email = sanitize_input(data['email'].lower(), 255)
         username = sanitize_input(data['username'], 80)

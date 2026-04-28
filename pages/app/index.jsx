@@ -26,6 +26,7 @@ import {
 import { Button } from "@/components/ui/button"
 import { getPublicKey, signTransaction, isConnected } from "@stellar/freighter-api"
 import ContractInteraction from "@/components/ContractInteraction"
+import MonacoEditor from "@/components/MonacoEditor"
 
 // ── Config ─────────────────────────────────────────────────────────────────────
 const BACKEND_URL = process.env.NEXT_PUBLIC_BACKEND_URL || "http://localhost:5000"
@@ -139,6 +140,46 @@ export default function IDEApp() {
     const [projectId, setProjectId]   = useState(null)  // from auth session
     const [fileContent, setFileContent] = useState(CODE_LINES.map(l => l.code).join("\n"))
     const [saveStatus, setSaveStatus] = useState("idle") // "idle" | "saving" | "saved" | "error"
+
+    // Monaco multi-file editor state (Issue #51)
+    const [openFiles, setOpenFiles] = useState([
+        {
+            path: "/workspace/src/contract.rs",
+            name: "contract.rs",
+            content: [
+                "",
+                "use soroban_sdk::{contract, contractimpl, Env, Symbol};",
+                "",
+                "#[contract]",
+                "pub struct TokenContract;",
+                "",
+                "#[contractimpl]",
+                "impl TokenContract {",
+                "    pub fn initialize(env: Env, admin: Address) {",
+                "        env.storage().instance().set(&Symbol::short(\"admin\"), &admin);",
+                "    }",
+                "",
+                "    pub fn mint(env: Env, to: Address, amount: i128) {",
+                "        // mint logic here",
+                "    }",
+                "}",
+            ].join("\n"),
+            isDirty: false,
+        },
+        {
+            path: "/workspace/src/lib.rs",
+            name: "lib.rs",
+            content: "// lib.rs\npub mod contract;",
+            isDirty: false,
+        },
+        {
+            path: "/workspace/Cargo.toml",
+            name: "Cargo.toml",
+            content: "[package]\nname = \"token_contract\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[dependencies]\nsoroban-sdk = { version = \"21.0.0\", features = [\"testutils\"] }",
+            isDirty: false,
+        },
+    ])
+    const [activeEditorPath, setActiveEditorPath] = useState("/workspace/src/contract.rs")
 
     // ── Deploy state ───────────────────────────────────────────────────────────
     const [isDeploying, setIsDeploying] = useState(false)
@@ -357,6 +398,38 @@ export default function IDEApp() {
     // ── File selection handler ─────────────────────────────────────────────────
     const handleFileSelect = (filePath) => {
         setActiveFile(filePath)
+        // Open file in Monaco editor tab if not already open
+        setOpenFiles((prev) => {
+            if (prev.some((f) => f.path === filePath)) {
+                setActiveEditorPath(filePath)
+                return prev
+            }
+            const name = filePath.split("/").pop() || filePath
+            setActiveEditorPath(filePath)
+            return [...prev, { path: filePath, name, content: "", isDirty: false }]
+        })
+    }
+
+    // Monaco: handle content change — marks file as dirty
+    const handleEditorChange = (filePath, newContent) => {
+        setOpenFiles((prev) =>
+            prev.map((f) =>
+                f.path === filePath
+                    ? { ...f, content: newContent, isDirty: true }
+                    : f
+            )
+        )
+    }
+
+    // Monaco: close a tab — switch to adjacent tab if active
+    const handleEditorClose = (filePath) => {
+        setOpenFiles((prev) => {
+            const remaining = prev.filter((f) => f.path !== filePath)
+            if (activeEditorPath === filePath) {
+                setActiveEditorPath(remaining.length > 0 ? remaining[remaining.length - 1].path : null)
+            }
+            return remaining
+        })
     }
 
     // ── Save handler — invalidates context cache ───────────────────────────────
@@ -992,18 +1065,18 @@ export default function IDEApp() {
                 {/* Editor + Chat */}
                 <div className="flex-1 flex overflow-hidden min-h-0">
 
-                    {/* Code editor */}
+                    {/* Monaco multi-file editor (Issue #51) */}
                     <div className="flex-1 flex flex-col min-w-0 overflow-hidden">
-                        <div className="flex-1 bg-[#0D1117] relative flex flex-col">
-                            <textarea
-                                value={fileContent}
-                                onChange={(e) => setFileContent(e.target.value)}
-                                spellCheck={false}
-                                className="flex-1 w-full bg-transparent text-gray-200 font-mono text-sm leading-6 p-4 resize-none focus:outline-none placeholder-gray-600"
-                                placeholder={activeFile ? `Editing ${activeFile.split('/').pop()}` : "Select a file to edit"}
-                                disabled={!activeFile}
-                            />
-                        </div>
+                        <MonacoEditor
+                            files={openFiles}
+                            activeFilePath={activeEditorPath}
+                            onFileSelect={(path) => {
+                                setActiveEditorPath(path)
+                                setActiveFile(path)
+                            }}
+                            onFileChange={handleEditorChange}
+                            onFileClose={handleEditorClose}
+                        />
                     </div>
 
                     {/* Chat panel */}

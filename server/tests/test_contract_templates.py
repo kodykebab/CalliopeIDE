@@ -4,7 +4,7 @@ import pytest
 import os
 import sys
 import functools
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 # Stub deps before import
 def _passthrough(f):
@@ -16,16 +16,14 @@ def _passthrough(f):
 
 _auth_stub = MagicMock()
 _auth_stub.token_required = _passthrough
-sys.modules["server.utils.auth_utils"] = _auth_stub
-sys.modules["server.models"] = MagicMock()
-sys.modules["server.utils.monitoring"] = MagicMock()
-
-import server.utils.contract_templates as ct
-import server.routes.template_routes as tr
-template_bp = tr.templates_bp
-
-for mod in ["server.utils.auth_utils", "server.models", "server.utils.monitoring"]:
-    sys.modules.pop(mod, None)
+with patch.dict("sys.modules", {
+    "server.utils.auth_utils": _auth_stub,
+    "server.models": MagicMock(),
+    "server.utils.monitoring": MagicMock()
+}):
+    import server.utils.contract_templates as ct
+    import server.routes.template_routes as tr
+    template_bp = tr.templates_bp
 
 from flask import Flask
 
