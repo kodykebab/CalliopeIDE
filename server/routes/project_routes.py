@@ -500,6 +500,147 @@ def read_project_file(current_user, project_id):
         return jsonify({'success': False, 'error': 'An error occurred while reading the file'}), 500
 
 
+@project_bp.route('/<int:project_id>/files/tree', methods=['GET'])
+@token_required
+def get_project_file_tree(current_user, project_id):
+    """
+    Return a recursive file-system tree for the project workspace.
+
+    Query parameters:
+        path  (optional) – subdirectory relative to project_path to list.
+                           Defaults to the project root.
+
+    Response:
+    {
+        "success": true,
+        "tree": [
+            {
+                "name": "src",
+                "path": "/abs/path/src",
+                "relative_path": "src",
+                "type": "directory",
+                "children": [
+                    {
+                        "name": "lib.rs",
+                        "path": "/abs/path/src/lib.rs",
+                        "relative_path": "src/lib.rs",
+                        "type": "file",
+                        "extension": ".rs",
+                        "size": 1024
+                    }
+                ]
+            }
+        ]
+    }
+    """
+    import os
+
+    # Directories / files to skip (common noise)
+    IGNORED_NAMES = {
+        '.git', '.svn', '__pycache__', 'node_modules', '.next',
+        '.venv', 'venv', '.env', 'dist', 'build', '.pytest_cache',
+        '.mypy_cache', '.tox', 'target', '.DS_Store', '.swc',
+        'coverage', '.coverage', 'htmlcov', '.idea', '.vscode',
+    }
+    IGNORED_EXTENSIONS = {'.pyc', '.pyo', '.pyd', '.so', '.o', '.a'}
+    MAX_DEPTH = 6   # prevent runaway recursion on large trees
+    MAX_ENTRIES = 500  # safety cap on total nodes returned
+
+    try:
+        project = ProjectMetadata.query.filter_by(
+            id=project_id, user_id=current_user.id, is_active=True
+        ).first()
+
+        if not project:
+            return jsonify({'success': False, 'error': 'Project not found'}), 404
+
+        if not project.project_path:
+            return jsonify({'success': False, 'error': 'Project has no path configured'}), 400
+
+        abs_project = os.path.realpath(project.project_path)
+
+        # Optional sub-path
+        sub_path = request.args.get('path', '').strip().lstrip('/')
+        if sub_path:
+            target = os.path.realpath(os.path.join(abs_project, sub_path))
+            if not target.startswith(abs_project):
+                return jsonify({'success': False, 'error': 'Path is outside project directory'}), 400
+        else:
+            target = abs_project
+
+        if not os.path.isdir(target):
+            return jsonify({'success': False, 'error': 'Target path is not a directory'}), 400
+
+        counter = {'n': 0}
+
+        def build_tree(directory: str, depth: int) -> list:
+            if depth > MAX_DEPTH or counter['n'] >= MAX_ENTRIES:
+                return []
+
+            entries = []
+            try:
+                items = sorted(os.scandir(directory), key=lambda e: (not e.is_dir(), e.name.lower()))
+            except PermissionError:
+                return []
+
+            for item in items:
+                if item.name in IGNORED_NAMES:
+                    continue
+                _, ext = os.path.splitext(item.name)
+                if ext in IGNORED_EXTENSIONS:
+                    continue
+
+                counter['n'] += 1
+                if counter['n'] > MAX_ENTRIES:
+                    break
+
+                abs_item = os.path.realpath(item.path)
+                rel = os.path.relpath(abs_item, abs_project)
+
+                if item.is_dir(follow_symlinks=False):
+                    children = build_tree(abs_item, depth + 1)
+                    entries.append({
+                        'name': item.name,
+                        'path': abs_item,
+                        'relative_path': rel,
+                        'type': 'directory',
+                        'children': children,
+                    })
+                else:
+                    try:
+                        size = item.stat().st_size
+                    except OSError:
+                        size = 0
+                    entries.append({
+                        'name': item.name,
+                        'path': abs_item,
+                        'relative_path': rel,
+                        'type': 'file',
+                        'extension': ext.lower(),
+                        'size': size,
+                    })
+
+            return entries
+
+        tree = build_tree(target, depth=0)
+
+        return jsonify({
+            'success': True,
+            'project_path': abs_project,
+            'tree': tree,
+            'total_nodes': counter['n'],
+        }), 200
+
+    except Exception as e:
+        logger.exception("Get project file tree error")
+        capture_exception(e, {
+            'route': 'project.get_project_file_tree',
+            'user_id': current_user.id,
+            'project_id': project_id,
+        })
+        return jsonify({'success': False, 'error': 'An error occurred while building the file tree'}), 500
+
+
 # ── Helper ────────────────────────────────────────────────────────────────────
 
 def _relative_path(absolute: str, base: str) -> str:
