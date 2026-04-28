@@ -1,9 +1,10 @@
-# Calliope IDE - Docker Compose Configuration
-# Usage: docker-compose up --build
+# Calliope IDE — Docker Compose (Issue #59: container-based sandbox)
+# Usage:  docker-compose up --build
 # Access: Frontend → http://localhost:3000 | Backend → http://localhost:5000
 
 services:
-  # Next.js Frontend
+
+  # ── Next.js Frontend ─────────────────────────────────────────────────────────
   frontend:
     build:
       context: .
@@ -21,35 +22,64 @@ services:
     networks:
       - calliope-net
 
-  # Python/Flask Backend
+  # ── Python / Flask Backend ────────────────────────────────────────────────────
   backend:
     build:
       context: ./server
       dockerfile: Dockerfile
+    image: calliope-backend:latest        # named so container_manager can reference it
     ports:
       - "${BACKEND_PORT:-5000}:5000"
     environment:
       - FLASK_ENV=${FLASK_ENV:-production}
       - APP_ENV=${APP_ENV:-production}
       - PORT=5000
-      - SECRET_KEY=${SECRET_KEY:?SECRET_KEY environment variable is required. Generate with: python -c "import secrets; print(secrets.token_hex(32))"}
-      - JWT_SECRET_KEY=${JWT_SECRET_KEY:?JWT_SECRET_KEY environment variable is required. Generate with: python -c "import secrets; print(secrets.token_hex(32))"}
+      - SECRET_KEY=${SECRET_KEY:?SECRET_KEY is required — python -c "import secrets; print(secrets.token_hex(32))"}
+      - JWT_SECRET_KEY=${JWT_SECRET_KEY:?JWT_SECRET_KEY is required — python -c "import secrets; print(secrets.token_hex(32))"}
       - JWT_ACCESS_TOKEN_EXPIRES=${JWT_ACCESS_TOKEN_EXPIRES:-3600}
       - JWT_REFRESH_TOKEN_EXPIRES=${JWT_REFRESH_TOKEN_EXPIRES:-2592000}
       - CORS_ORIGINS=http://localhost:3000,http://frontend:3000
       - RATE_LIMIT_ENABLED=${RATE_LIMIT_ENABLED:-true}
       - RATE_LIMIT_PER_MINUTE=${RATE_LIMIT_PER_MINUTE:-60}
-      - GEMINI_API_KEY=${GEMINI_API_KEY:?GEMINI_API_KEY environment variable is required}
+      - GEMINI_API_KEY=${GEMINI_API_KEY:?GEMINI_API_KEY is required}
       - DATABASE_URL=sqlite:///data/calliope.db
+      # Issue #59: Docker sandbox configuration
+      - SANDBOX_IMAGE=calliope-sandbox:latest
+      - SANDBOX_CPU=${SANDBOX_CPU:-0.5}
+      - SANDBOX_MEMORY=${SANDBOX_MEMORY:-64m}
+      - AGENT_IMAGE=calliope-backend:latest
+      - AGENT_MEMORY=${AGENT_MEMORY:-256m}
+      - AGENT_CPU=${AGENT_CPU:-1.0}
+      - AGENT_NETWORK=calliope-net
     volumes:
       - backend-data:/app/data
+      # Issue #59: mount Docker socket so the backend can manage sandbox containers
+      - /var/run/docker.sock:/var/run/docker.sock:ro
     healthcheck:
       test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:5000/health"]
       interval: 30s
       timeout: 5s
       retries: 3
-      start_period: 10s
+      start_period: 15s
     restart: unless-stopped
+    networks:
+      - calliope-net
+    depends_on:
+      sandbox-builder:
+        condition: service_completed_successfully
+
+  # ── Issue #59: Sandbox image builder (one-shot) ───────────────────────────────
+  # Builds calliope-sandbox:latest before the backend starts.
+  # Exits with code 0 on success; backend depends on this via service_completed_successfully.
+  sandbox-builder:
+    build:
+      context: .
+      dockerfile: docker/sandbox.Dockerfile
+      tags:
+        - "calliope-sandbox:latest"
+    image: calliope-sandbox:latest
+    # This service only builds the image; it has no running process.
+    command: ["echo", "Sandbox image built successfully"]
     networks:
       - calliope-net
 
@@ -58,5 +88,7 @@ volumes:
     driver: local
 
 networks:
+  # Shared network used by the backend and dynamically-created agent containers.
+  # sandbox containers use --network none (no entry here needed).
   calliope-net:
     driver: bridge

@@ -182,6 +182,10 @@ def create_restricted_environment() -> Dict[str, str]:
 def secure_execute(code: str, timeout: int = EXECUTION_TIMEOUT) -> Dict[str, Any]:
     """
     Execute user code in a secure sandboxed environment.
+
+    Issue #59: tries the Docker container sandbox first; falls back to the
+    subprocess sandbox when Docker is unavailable (e.g. local dev without Docker).
+    Static analysis via validate_code_safety() always runs regardless of backend.
     
     Args:
         code: The Python code to execute
@@ -215,16 +219,55 @@ def secure_execute(code: str, timeout: int = EXECUTION_TIMEOUT) -> Dict[str, Any
                 'execution_time': time.time() - start_time
             }
         
-        # Security validation
+        # Security validation — always runs for both Docker and subprocess paths
         validate_code_safety(code)
+
+        # Issue #59: try Docker container sandbox first
+        try:
+            from server.utils.docker_executor import run_code_in_sandbox, is_docker_available
+            if is_docker_available():
+                logger.debug("secure_execute: using Docker sandbox")
+                return run_code_in_sandbox(code, timeout=timeout)
+        except ImportError:
+            pass
+
+        # Fallback: subprocess sandbox (dev / Docker-unavailable environments)
+        logger.debug("secure_execute: using subprocess fallback")
+        return _subprocess_execute(code, timeout, start_time)
+    
+    except SecurityError as e:
+        logger.warning(f"Security violation detected: {str(e)}")
+        return {
+            'status': 'error',
+            'output': '',
+            'error': f'Restricted operation detected: {str(e)}',
+            'execution_time': time.time() - start_time
+        }
+    
+    except Exception as e:
+        logger.error(f"Unexpected error in secure_execute: {str(e)}")
+        return {
+            'status': 'error',
+            'output': '',
+            'error': f'Internal execution error: {str(e)}',
+            'execution_time': time.time() - start_time
+        }
+
+
+def _subprocess_execute(code: str, timeout: int, start_time: float) -> Dict[str, Any]:
+    """
+    Original subprocess-based execution sandbox.
+
+    Used as fallback when Docker is unavailable. Extracted from the original
+    secure_execute() body — no logic changed.
+    """
+    # Create temporary directory for execution
+    with tempfile.TemporaryDirectory() as temp_dir:
+        # Create the Python script file
+        script_path = os.path.join(temp_dir, 'user_code.py')
         
-        # Create temporary directory for execution
-        with tempfile.TemporaryDirectory() as temp_dir:
-            # Create the Python script file
-            script_path = os.path.join(temp_dir, 'user_code.py')
-            
-            # Wrap user code with security restrictions
-            wrapped_code = f'''
+        # Wrap user code with security restrictions
+        wrapped_code = f'''
 import sys
 import os
 
@@ -253,132 +296,114 @@ os.system = lambda cmd: None
 # User code starts here
 {code}
 '''
+        
+        try:
+            with open(script_path, 'w', encoding='utf-8') as f:
+                f.write(wrapped_code)
+        except Exception as e:
+            return {
+                'status': 'error',
+                'output': '',
+                'error': f'Failed to create script file: {str(e)}',
+                'execution_time': time.time() - start_time
+            }
+        
+        # Prepare restricted environment
+        env = create_restricted_environment()
+        
+        # Execute the code in subprocess with restrictions
+        try:
+            # Create preexec function for Unix systems
+            def preexec_fn():
+                if sys.platform != 'win32':
+                    set_memory_limit()
+                    # Set process group to allow killing child processes
+                    os.setpgrp()
+            
+            preexec = preexec_fn if sys.platform != 'win32' else None
+            
+            # Run the subprocess
+            process = subprocess.Popen(
+                [sys.executable, script_path],
+                cwd=temp_dir,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                env=env,
+                preexec_fn=preexec,
+                creationflags=subprocess.CREATE_NEW_PROCESS_GROUP if sys.platform == 'win32' else 0
+            )
             
             try:
-                with open(script_path, 'w', encoding='utf-8') as f:
-                    f.write(wrapped_code)
-            except Exception as e:
-                return {
-                    'status': 'error',
-                    'output': '',
-                    'error': f'Failed to create script file: {str(e)}',
-                    'execution_time': time.time() - start_time
-                }
-            
-            # Prepare restricted environment
-            env = create_restricted_environment()
-            
-            # Execute the code in subprocess with restrictions
-            try:
-                # Create preexec function for Unix systems
-                def preexec_fn():
-                    if sys.platform != 'win32':
-                        set_memory_limit()
-                        # Set process group to allow killing child processes
-                        os.setpgrp()
-                
-                preexec = preexec_fn if sys.platform != 'win32' else None
-                
-                # Run the subprocess
-                process = subprocess.Popen(
-                    [sys.executable, script_path],
-                    cwd=temp_dir,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE,
-                    text=True,
-                    env=env,
-                    preexec_fn=preexec,
-                    creationflags=subprocess.CREATE_NEW_PROCESS_GROUP if sys.platform == 'win32' else 0
-                )
-                
+                stdout, stderr = process.communicate(timeout=timeout)
+            except subprocess.TimeoutExpired:
+                # Kill the process group to ensure all child processes are terminated
                 try:
-                    stdout, stderr = process.communicate(timeout=timeout)
-                except subprocess.TimeoutExpired:
-                    # Kill the process group to ensure all child processes are terminated
-                    try:
-                        if sys.platform == 'win32':
-                            process.terminate()
-                        else:
-                            os.killpg(os.getpgid(process.pid), signal.SIGTERM)
-                    except (OSError, ProcessLookupError):
-                        pass
-                    
-                    process.kill()
-                    return {
-                        'status': 'timeout',
-                        'output': '',
-                        'error': f'Execution time limit exceeded ({timeout}s)',
-                        'execution_time': timeout
-                    }
-                
-                execution_time = time.time() - start_time
-                
-                # Check output size limits
-                if len(stdout) > MAX_OUTPUT_SIZE:
-                    stdout = stdout[:MAX_OUTPUT_SIZE] + '\n... (output truncated)'
-                
-                if len(stderr) > MAX_OUTPUT_SIZE:
-                    stderr = stderr[:MAX_OUTPUT_SIZE] + '\n... (error output truncated)'
-                
-                # Determine result status
-                if process.returncode == 0:
-                    if stderr:
-                        # There might be warnings but execution succeeded
-                        return {
-                            'status': 'success',
-                            'output': stdout,
-                            'error': f'Warnings: {stderr}',
-                            'execution_time': execution_time
-                        }
+                    if sys.platform == 'win32':
+                        process.terminate()
                     else:
-                        return {
-                            'status': 'success',
-                            'output': stdout,
-                            'error': '',
-                            'execution_time': execution_time
-                        }
-                else:
-                    # Check for specific error types
-                    if 'MemoryError' in stderr or 'memory' in stderr.lower():
-                        return {
-                            'status': 'memory_error',
-                            'output': stdout,
-                            'error': 'Memory limit exceeded',
-                            'execution_time': execution_time
-                        }
-                    else:
-                        return {
-                            'status': 'error',
-                            'output': stdout,
-                            'error': stderr or 'Unknown execution error',
-                            'execution_time': execution_time
-                        }
-                        
-            except Exception as e:
+                        os.killpg(os.getpgid(process.pid), signal.SIGTERM)
+                except (OSError, ProcessLookupError):
+                    pass
+                
+                process.kill()
                 return {
-                    'status': 'error',
+                    'status': 'timeout',
                     'output': '',
-                    'error': f'Subprocess execution failed: {str(e)}',
-                    'execution_time': time.time() - start_time
+                    'error': f'Execution time limit exceeded ({timeout}s)',
+                    'execution_time': timeout
                 }
-    
-    except SecurityError as e:
-        logger.warning(f"Security violation detected: {str(e)}")
-        return {
-            'status': 'error',
-            'output': '',
-            'error': f'Restricted operation detected: {str(e)}',
-            'execution_time': time.time() - start_time
-        }
-    
-    except Exception as e:
-        logger.error(f"Unexpected error in secure_execute: {str(e)}")
-        return {
-            'status': 'error',
-            'output': '',
-            'error': f'Internal execution error: {str(e)}',
-            'execution_time': time.time() - start_time
-        }
+            
+            execution_time = time.time() - start_time
+            
+            # Check output size limits
+            if len(stdout) > MAX_OUTPUT_SIZE:
+                stdout = stdout[:MAX_OUTPUT_SIZE] + '\n... (output truncated)'
+            
+            if len(stderr) > MAX_OUTPUT_SIZE:
+                stderr = stderr[:MAX_OUTPUT_SIZE] + '\n... (error output truncated)'
+            
+            # Determine result status
+            if process.returncode == 0:
+                if stderr:
+                    # There might be warnings but execution succeeded
+                    return {
+                        'status': 'success',
+                        'output': stdout,
+                        'error': f'Warnings: {stderr}',
+                        'execution_time': execution_time
+                    }
+                else:
+                    return {
+                        'status': 'success',
+                        'output': stdout,
+                        'error': '',
+                        'execution_time': execution_time
+                    }
+            else:
+                # Check for specific error types
+                if 'MemoryError' in stderr or 'memory' in stderr.lower():
+                    return {
+                        'status': 'memory_error',
+                        'output': stdout,
+                        'error': 'Memory limit exceeded',
+                        'execution_time': execution_time
+                    }
+                else:
+                    return {
+                        'status': 'error',
+                        'output': stdout,
+                        'error': stderr or 'Unknown execution error',
+                        'execution_time': execution_time
+                    }
+                    
+        except Exception as e:
+            return {
+                'status': 'error',
+                'output': '',
+                'error': f'Subprocess execution failed: {str(e)}',
+                'execution_time': time.time() - start_time
+            }
 
 
 def test_security_measures():

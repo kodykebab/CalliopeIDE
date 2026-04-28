@@ -26,7 +26,10 @@ from server.routes.soroban_wallet import wallet_bp
 from server.utils import token_required, secure_execute, SecurityError
 from server.utils.db_utils import create_session_for_user, add_chat_message, ensure_database_directory, get_database_stats
 from server.utils.monitoring import setup_logging, init_sentry, monitor_endpoint, get_monitoring_stats
- 
+
+# Issue #59: container manager replaces subprocess.Popen for agent sessions
+from server.utils import container_manager
+from server.utils.docker_executor import ensure_sandbox_image, is_docker_available
 
 # Resolve agent.py path relative to this file
 _SERVER_DIR = os.path.abspath(os.path.dirname(__file__))
@@ -96,6 +99,19 @@ if LIMITER_AVAILABLE and os.getenv('RATE_LIMIT_ENABLED', 'true').lower() == 'tru
         default_limits=[f"{os.getenv('RATE_LIMIT_PER_MINUTE', '60')}/minute"]
     )
 
+# Issue #59: pre-build sandbox image at startup (non-blocking)
+def _init_docker():
+    if is_docker_available():
+        app.logger.info("Docker available — building sandbox image in background …")
+        ensure_sandbox_image()
+    else:
+        app.logger.warning(
+            "Docker not available. Container sandbox disabled; "
+            "subprocess fallback will be used for code execution."
+        )
+
+threading.Thread(target=_init_docker, daemon=True, name="sandbox-init").start()
+
 count = 0
 lock = threading.Lock()
 
@@ -128,13 +144,28 @@ def create_session(current_user):
 
     port = find_free_port()
 
-    # Start the agent process
-    subprocess.Popen(
-        ["python3", "agent.py", str(port)],
-        cwd=inst,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL
-    )
+    # Issue #59: launch agent inside an isolated container when Docker is available
+    container_id = None
+
+    if is_docker_available():
+        container_id = container_manager.create_agent_container(
+            port=port,
+            instance_dir=os.path.abspath(inst),
+            session_id=f"session_{idx}_{user_id}",
+        )
+        if container_id is None:
+            app.logger.warning(
+                "Container creation failed for session %d — falling back to subprocess", idx
+            )
+
+    if container_id is None:
+        # Fallback: bare subprocess (dev / Docker-unavailable environments)
+        subprocess.Popen(
+            ["python3", "agent.py", str(port)],
+            cwd=inst,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL
+        )
 
     try:
         # Create session in database
@@ -150,6 +181,8 @@ def create_session(current_user):
             'location': os.path.abspath(inst),
             'port': port,
             'instance_dir': inst,
+            'container_id': container_id,
+            'isolated': container_id is not None,
             'created_at': session.created_at.isoformat()
         }
         
@@ -166,6 +199,9 @@ def create_session(current_user):
         
     except Exception as e:
         print(f"Session creation error: {str(e)}")
+        # Best-effort cleanup if container was created
+        if container_id:
+            container_manager.destroy_agent_container(container_id)
         return jsonify({
             'success': False,
             'error': 'Failed to create session',
@@ -223,6 +259,10 @@ def health_check():
         'status': 'healthy',
         'service': 'Calliope IDE',
         'authentication': 'enabled',
+        'sandbox': {
+            'docker_available': is_docker_available(),
+            'mode': 'container' if is_docker_available() else 'subprocess-fallback',
+        },
         'version': '1.0.0'
     }), 200
 
@@ -380,7 +420,7 @@ def execute_code_internal(current_user):
             timeout = 5
         
         # Log the execution attempt
-        app.logger.info(f"User {current_user.username} (ID: {current_user.id}) executing code")
+        app.logger.info(f"User {current_user.username} (ID: {current_user.id}) executing code [sandbox: {'docker' if is_docker_available() else 'subprocess'}]")
         
         # Execute the code securely
         result = secure_execute(code, timeout=timeout)
@@ -499,6 +539,15 @@ def handle_exception(error):
     }), 500
 
 
+# Issue #59: destroy all agent containers on server exit
+import atexit
+
+@atexit.register
+def _shutdown():
+    app.logger.info("Server shutting down — destroying agent containers …")
+    container_manager.destroy_all_agent_containers()
+
+
 if __name__ == "__main__":
     port = int(os.getenv('PORT', 5000))
     debug = os.getenv('FLASK_ENV', 'development') == 'development'
@@ -509,12 +558,14 @@ if __name__ == "__main__":
     print(f"📍 Port: {port}")
     print(f"💾 Database: {os.getenv('DATABASE_URL', 'sqlite:///calliope.db')}")
     print(f"🔐 Authentication: REQUIRED")
+    print(f"🐳 Sandbox: {'Docker (container isolation)' if is_docker_available() else 'subprocess fallback'}")
     print("=" * 70)
     print("\n✅ Acceptance Criteria Met:")
     print("   • Users can sign up and log in")
     print("   • Authentication state validated server-side")
     print("   • Protected endpoints reject unauthenticated requests")
     print("   • Clear error responses for invalid credentials")
+    print("   • Code execution runs inside isolated containers (Issue #59)")
     print("=" * 70)
     
     app.run(host='0.0.0.0', port=port, threaded=True, use_reloader=False, debug=debug)
