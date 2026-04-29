@@ -5,6 +5,7 @@ Addresses issue #58.
 Endpoints:
   POST /api/soroban/invoke                           — call a contract function
   GET  /api/soroban/invocations/<session_id>         — list invocation history
+  GET  /api/soroban/events/<session_id>              — contract events from invocations
   GET  /api/soroban/state/<session_id>/<contract_id> — read contract ledger state
 """
 
@@ -119,6 +120,59 @@ def _scval_to_python(val) -> object:
         return repr(val)
     except Exception:
         return repr(val)
+
+
+def _extract_soroban_events(result_meta_xdr: str) -> list[dict]:
+    """
+    Decode contract events emitted during a Soroban transaction.
+
+    Parses the TransactionMetaV3.soroban_meta.events field from the
+    result_meta_xdr returned by get_transaction. Only CONTRACT and SYSTEM
+    events are included; DIAGNOSTIC events are filtered out.
+
+    Returns a list of dicts with keys: type, contract_id, topics, data.
+    Returns an empty list if the XDR cannot be parsed or contains no events.
+    """
+    if not result_meta_xdr:
+        return []
+    try:
+        from stellar_sdk import xdr as stellar_xdr, StrKey
+
+        meta = stellar_xdr.TransactionMeta.from_xdr(result_meta_xdr)
+        if not (meta.v3 and meta.v3.soroban_meta):
+            return []
+
+        decoded_events = []
+        for event in meta.v3.soroban_meta.events:
+            event_type = event.type.name  # "CONTRACT", "SYSTEM", "DIAGNOSTIC"
+            if event_type == "DIAGNOSTIC":
+                continue
+
+            contract_id = None
+            if event.contract_id:
+                try:
+                    contract_id = StrKey.encode_contract(event.contract_id.hash)
+                except Exception:
+                    contract_id = event.contract_id.hash.hex()
+
+            topics: list = []
+            data = None
+            if event.body and event.body.v0:
+                v0 = event.body.v0
+                topics = [_scval_to_python(t) for t in (v0.topics.sc_vec or [])]
+                data = _scval_to_python(v0.data)
+
+            decoded_events.append({
+                "type": event_type,
+                "contract_id": contract_id,
+                "topics": topics,
+                "data": data,
+            })
+
+        return decoded_events
+    except Exception:
+        logger.debug("Failed to extract Soroban events from result_meta_xdr", exc_info=True)
+        return []
 
 
 def _save_invocation_record(instance_dir: str, record: dict) -> None:
@@ -255,11 +309,14 @@ def invoke_contract(current_user):
                 "transaction_hash": send_resp.hash,
             }), 422
 
+        events = _extract_soroban_events(invoke_result.get("result_meta_xdr") or "")
+
         record = {
             "contract_id": contract_id,
             "function_name": function_name,
             "parameters": parameters,
             "result": invoke_result.get("result"),
+            "events": events,
             "transaction_hash": send_resp.hash,
             "invoker_public_key": invoker_public,
             "network": "testnet",
@@ -276,6 +333,7 @@ def invoke_contract(current_user):
             "success": True,
             **record,
             "explorer_url": f"https://stellar.expert/explorer/testnet/tx/{send_resp.hash}",
+            "event_count": len(events),
         }), 200
 
     except Exception as e:
@@ -327,6 +385,78 @@ def list_invocations(current_user, session_id):
             "session_id": session_id,
         })
         return jsonify({"success": False, "error": "An error occurred while listing invocations"}), 500
+
+
+# ---------------------------------------------------------------------------
+# GET /api/soroban/events/<session_id>
+# ---------------------------------------------------------------------------
+
+@soroban_invoke_bp.route("/events/<int:session_id>", methods=["GET"])
+@token_required
+def list_contract_events(current_user, session_id):
+    """
+    Return all Soroban contract events emitted across a session's invocations.
+
+    Reads event data persisted in invocation records (populated since this
+    feature was added). Supports optional filtering by contract_id.
+
+    Query params:
+        contract_id (str) — optional: filter events to a specific contract
+
+    Response JSON:
+        success, events (list), total (int)
+
+    Each event dict contains:
+        transaction_hash, timestamp, invoked_function,
+        type, contract_id, topics, data
+    """
+    try:
+        session = Session.query.filter_by(
+            id=session_id, user_id=current_user.id, is_active=True
+        ).first()
+        if not session:
+            return jsonify({"success": False, "error": "Session not found or access denied"}), 404
+
+        instance_dir = session.instance_dir
+        if not instance_dir or not os.path.isdir(instance_dir):
+            return jsonify({"success": True, "events": [], "total": 0}), 200
+
+        filter_contract = (request.args.get("contract_id") or "").strip() or None
+
+        inv_dir = os.path.join(instance_dir, ".invocations")
+        all_events: list[dict] = []
+
+        if os.path.isdir(inv_dir):
+            for f in sorted(Path(inv_dir).glob("*.json")):
+                try:
+                    record = json.loads(f.read_text())
+                except Exception:
+                    continue
+
+                for event in record.get("events") or []:
+                    if filter_contract and event.get("contract_id") != filter_contract:
+                        continue
+                    all_events.append({
+                        "transaction_hash": record.get("transaction_hash"),
+                        "timestamp": record.get("timestamp"),
+                        "invoked_function": record.get("function_name"),
+                        **event,
+                    })
+
+        return jsonify({
+            "success": True,
+            "events": all_events,
+            "total": len(all_events),
+        }), 200
+
+    except Exception as e:
+        logger.exception("list_contract_events error")
+        capture_exception(e, {
+            "route": "soroban_invoke.list_contract_events",
+            "user_id": current_user.id,
+            "session_id": session_id,
+        })
+        return jsonify({"success": False, "error": "An error occurred while listing events"}), 500
 
 
 # ---------------------------------------------------------------------------
@@ -433,7 +563,11 @@ def _wait_for_transaction(server, tx_hash: str, max_attempts: int = 10) -> dict:
                         decoded = _scval_to_python(val)
                 except Exception:
                     decoded = result.return_value
-                return {"success": True, "result": decoded}
+                return {
+                    "success": True,
+                    "result": decoded,
+                    "result_meta_xdr": getattr(result, "result_meta_xdr", None),
+                }
             if result.status == GetTransactionStatus.FAILED:
                 return {"success": False, "error": "Transaction failed on-chain"}
         except Exception as exc:

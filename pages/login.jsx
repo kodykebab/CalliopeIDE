@@ -39,7 +39,7 @@ export default function LoginPage() {
             : `${BACKEND_URL}/api/auth/register`
 
         const body = tab === "login"
-            ? { email, password }
+            ? { login: email, password }
             : { email, username, password }
 
         try {
