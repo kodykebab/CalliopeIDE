@@ -144,7 +144,9 @@ class TestPrepareInvoke:
         valid_contract = "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM"
         valid_public = "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF"
         
-        with patch("server.routes.soroban_invoke._parse_param", side_effect=ValueError("bad param")):
+        # Mock both the parameter parsing and the server
+        with patch("server.routes.soroban_invoke._parse_param", side_effect=ValueError("bad param")), \
+             patch("stellar_sdk.SorobanServer"):
             resp = client.post("/api/soroban/prepare-invoke", json={
                 "session_id": 1,
                 "contract_id": valid_contract,
