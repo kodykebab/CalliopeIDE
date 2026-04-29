@@ -94,15 +94,17 @@ class TestInvokeValidation:
         assert b"contract_id" in resp.data
 
     def test_missing_function_name(self, client):
+        valid_contract = "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM"
         resp = client.post("/api/soroban/invoke", json={
-            "session_id": 1, "contract_id": "CTEST", "invoker_secret": "S"
+            "session_id": 1, "contract_id": valid_contract, "invoker_secret": "S"
         })
         assert resp.status_code == 400
         assert b"function_name" in resp.data
 
     def test_missing_invoker_secret(self, client):
+        valid_contract = "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM"
         resp = client.post("/api/soroban/invoke", json={
-            "session_id": 1, "contract_id": "CTEST", "function_name": "hello"
+            "session_id": 1, "contract_id": valid_contract, "function_name": "hello"
         })
         assert resp.status_code == 400
         assert b"invoker_secret" in resp.data
@@ -110,8 +112,9 @@ class TestInvokeValidation:
     def test_parameters_not_list(self, client, tmp_path):
         d = str(tmp_path / "inst"); os.makedirs(d)
         m.Session = _yes_session(d)
+        valid_contract = "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM"
         resp = client.post("/api/soroban/invoke", json={
-            "session_id": 1, "contract_id": "CTEST",
+            "session_id": 1, "contract_id": valid_contract,
             "function_name": "hello", "invoker_secret": "S",
             "parameters": "not-a-list",
         })
@@ -120,8 +123,9 @@ class TestInvokeValidation:
 
     def test_session_not_found(self, client):
         m.Session = _no_session()
+        valid_contract = "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM"
         resp = client.post("/api/soroban/invoke", json={
-            "session_id": 99, "contract_id": "CTEST",
+            "session_id": 99, "contract_id": valid_contract,
             "function_name": "hello", "invoker_secret": "S"
         })
         assert resp.status_code == 404
@@ -130,8 +134,9 @@ class TestInvokeValidation:
         d = str(tmp_path / "inst"); os.makedirs(d)
         m.Session = _yes_session(d)
         m._get_stellar_sdk = lambda: (False, "stellar-sdk is not installed")
+        valid_contract = "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM"
         resp = client.post("/api/soroban/invoke", json={
-            "session_id": 1, "contract_id": "CTEST",
+            "session_id": 1, "contract_id": valid_contract,
             "function_name": "hello", "invoker_secret": "S"
         })
         assert resp.status_code == 500
@@ -141,10 +146,11 @@ class TestInvokeValidation:
         d = str(tmp_path / "inst"); os.makedirs(d)
         m.Session = _yes_session(d)
         m._get_stellar_sdk = lambda: (True, None)
+        valid_contract = "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM"
 
         with patch("stellar_sdk.Keypair.from_secret", side_effect=Exception("bad key")):
             resp = client.post("/api/soroban/invoke", json={
-                "session_id": 1, "contract_id": "CTEST",
+                "session_id": 1, "contract_id": valid_contract,
                 "function_name": "hello", "invoker_secret": "BADKEY"
             })
 
