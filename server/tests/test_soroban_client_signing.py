@@ -144,9 +144,13 @@ class TestPrepareInvoke:
         valid_contract = "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM"
         valid_public = "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF"
         
-        # Mock both the parameter parsing and the server
+        # Mock the server to avoid network calls, and _parse_param to raise error
+        mock_server = MagicMock()
+        mock_account = MagicMock()
+        mock_server.return_value.load_account.return_value = mock_account
+        
         with patch("server.routes.soroban_invoke._parse_param", side_effect=ValueError("bad param")), \
-             patch("stellar_sdk.SorobanServer"):
+             patch("stellar_sdk.SorobanServer", mock_server):
             resp = client.post("/api/soroban/prepare-invoke", json={
                 "session_id": 1,
                 "contract_id": valid_contract,
@@ -156,7 +160,10 @@ class TestPrepareInvoke:
             })
         
         assert resp.status_code == 400
-        assert b"Invalid parameter format" in resp.data
+        data = resp.get_json()
+        assert data is not None
+        assert data["success"] is False
+        assert "Invalid parameter format" in data["error"]
 
     def test_successful_preparation(self, client, tmp_path):
         """Test successful unsigned transaction preparation"""
