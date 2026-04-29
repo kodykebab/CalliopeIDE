@@ -302,3 +302,7 @@ This project is licensed under the MIT License - see the `LICENSE` file for deta
 ---
 
 Built with ❤️ using [Next.js](https://nextjs.org) and [HeroUI](https://heroui.com).
+## Improvements
+
+- Improved documentation clarity
+- Added better explanation for Soroban smart contract workflow
