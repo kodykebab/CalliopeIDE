@@ -25,7 +25,7 @@ const STATUS_MESSAGES = {
   error: "",
 };
 
-export default function DeployPanel({ sessionId, wasmPath, network = "testnet" }) {
+export default function DeployPanel({ sessionId, wasmPath, authToken, network = "testnet" }) {
   const [status, setStatus] = useState(STATUS.IDLE);
   const [contractId, setContractId] = useState(null);
   const [errorMsg, setErrorMsg] = useState("");
@@ -40,52 +40,85 @@ export default function DeployPanel({ sessionId, wasmPath, network = "testnet" }
       // Step 1: get public key from Freighter
       const publicKey = await getWalletPublicKey();
 
-      // Step 2: request unsigned XDR from backend
+      // Step 2: Upload WASM
       setStatus(STATUS.BUILDING);
-      const buildRes = await fetch("/api/soroban/build-deploy-tx", {
+      const uploadRes = await fetch("/api/soroban/prepare-upload", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { "Content-Type": "application/json", "Authorization": `Bearer ${authToken}` },
         body: JSON.stringify({
           session_id: sessionId,
           wasm_path: wasmPath,
-          deployer_public_key: publicKey,
-          fund_account: fundAccount,
-          network,
+          public_key: publicKey,
         }),
       });
 
-      if (!buildRes.ok) {
-        const err = await buildRes.json();
-        throw new Error(err.error || "Failed to build transaction");
+      if (!uploadRes.ok) {
+        const err = await uploadRes.json();
+        throw new Error(err.error || "Failed to prepare upload transaction");
       }
 
-      const { unsigned_xdr } = await buildRes.json();
+      const { unsigned_xdr: uploadXdr } = await uploadRes.json();
 
-      // Step 3: sign with Freighter (client-side, key never leaves browser)
+      // Step 3: Sign upload transaction
       setStatus(STATUS.SIGNING);
-      const signedXdr = await signWithFreighter(
-        unsigned_xdr,
-        NETWORKS[network]
-      );
+      const signedUploadXdr = await signWithFreighter(uploadXdr, NETWORKS[network]);
 
-      // Step 4: submit signed XDR
+      // Step 4: Submit upload transaction
       setStatus(STATUS.DEPLOYING);
-      const deployRes = await fetch("/api/soroban/submit-deploy", {
+      const submitUploadRes = await fetch("/api/soroban/submit-tx", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { "Content-Type": "application/json", "Authorization": `Bearer ${authToken}` },
+        body: JSON.stringify({
+          signed_xdr: signedUploadXdr,
+        }),
+      });
+
+      if (!submitUploadRes.ok) {
+        const err = await submitUploadRes.json();
+        throw new Error(err.error || "WASM upload failed");
+      }
+
+      const { wasm_hash } = await submitUploadRes.json();
+
+      // Step 5: Create contract instance
+      setStatus(STATUS.BUILDING);
+      const createRes = await fetch("/api/soroban/prepare-create", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "Authorization": `Bearer ${authToken}` },
         body: JSON.stringify({
           session_id: sessionId,
-          signed_xdr: signedXdr,
-          network,
+          wasm_hash: wasm_hash,
+          public_key: publicKey,
         }),
       });
 
-      if (!deployRes.ok) {
-        const err = await deployRes.json();
-        throw new Error(err.error || "Deployment failed");
+      if (!createRes.ok) {
+        const err = await createRes.json();
+        throw new Error(err.error || "Failed to prepare create transaction");
       }
 
-      const { contract_id } = await deployRes.json();
+      const { unsigned_xdr: createXdr } = await createRes.json();
+
+      // Step 6: Sign create transaction
+      setStatus(STATUS.SIGNING);
+      const signedCreateXdr = await signWithFreighter(createXdr, NETWORKS[network]);
+
+      // Step 7: Submit create transaction
+      setStatus(STATUS.DEPLOYING);
+      const submitCreateRes = await fetch("/api/soroban/submit-tx", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "Authorization": `Bearer ${authToken}` },
+        body: JSON.stringify({
+          signed_xdr: signedCreateXdr,
+        }),
+      });
+
+      if (!submitCreateRes.ok) {
+        const err = await submitCreateRes.json();
+        throw new Error(err.error || "Contract creation failed");
+      }
+
+      const { contract_id } = await submitCreateRes.json();
       setContractId(contract_id);
       setStatus(STATUS.SUCCESS);
     } catch (err) {

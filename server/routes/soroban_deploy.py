@@ -72,12 +72,16 @@ def _resolve_wasm_path(raw_path: str, instance_dir: str) -> str | None:
 @check_friendbot_limits()
 def deploy_contract(current_user):
     """
-    Deploy a compiled Soroban WASM contract to Stellar testnet.
+    [DEPRECATED] Deploy a compiled Soroban WASM contract to Stellar testnet.
+    
+    SECURITY WARNING: This endpoint accepts secret keys and is deprecated.
+    Use /api/soroban/prepare-upload, /api/soroban/prepare-create, and /api/soroban/submit-tx with Freighter wallet instead.
+    This endpoint will be removed in a future version.
 
     Request JSON:
         session_id      (int)   — active session ID
         wasm_path       (str)   — relative path to .wasm file inside instance dir
-        deployer_secret (str)   — Stellar secret key of the deployer account
+        deployer_secret (str)   — Stellar secret key of the deployer account [SECURITY RISK]
         fund_account    (bool)  — fund account via Friendbot if balance is zero (default: true)
 
     Response JSON:

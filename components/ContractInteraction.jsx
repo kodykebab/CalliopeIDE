@@ -3,6 +3,7 @@
 import { useState } from "react"
 import { Play, RefreshCw, ChevronDown, ChevronUp, Clock, Database } from "lucide-react"
 import { Button } from "@/components/ui/button"
+import { getWalletPublicKey, signWithFreighter, NETWORKS } from "../lib/freighter"
 
 /**
  * ContractInteraction — invoke contract functions and view ledger state.
@@ -18,11 +19,12 @@ export default function ContractInteraction({ sessionId, authToken, apiBaseUrl }
   // ── invoke form state ──────────────────────────────────────────────────
   const [contractId, setContractId] = useState("")
   const [functionName, setFunctionName] = useState("")
-  const [invokerSecret, setInvokerSecret] = useState("")
   const [paramsRaw, setParamsRaw] = useState("")   // one param per line
   const [invoking, setInvoking] = useState(false)
   const [invokeResult, setInvokeResult] = useState(null)
   const [invokeError, setInvokeError] = useState(null)
+  const [invokeStatus, setInvokeStatus] = useState("idle")  // idle, connecting, building, signing, submitting
+  const [publicKey, setPublicKey] = useState("")
 
   // ── history state ──────────────────────────────────────────────────────
   const [history, setHistory] = useState([])
@@ -46,6 +48,7 @@ export default function ContractInteraction({ sessionId, authToken, apiBaseUrl }
     setInvoking(true)
     setInvokeResult(null)
     setInvokeError(null)
+    setInvokeStatus("connecting")
 
     const parameters = paramsRaw
       .split("\n")
@@ -53,19 +56,51 @@ export default function ContractInteraction({ sessionId, authToken, apiBaseUrl }
       .filter(Boolean)
 
     try {
-      const res = await fetch(`${base}/api/soroban/invoke`, {
+      // Step 1: Get public key from Freighter
+      const userPublicKey = await getWalletPublicKey()
+      setPublicKey(userPublicKey)
+
+      // Step 2: Build unsigned transaction
+      setInvokeStatus("building")
+      const prepareRes = await fetch(`${base}/api/soroban/prepare-invoke`, {
         method: "POST",
         headers,
         body: JSON.stringify({
           session_id: sessionId,
           contract_id: contractId.trim(),
           function_name: functionName.trim(),
-          invoker_secret: invokerSecret.trim(),
+          parameters,
+          public_key: userPublicKey,
+        }),
+      })
+
+      if (!prepareRes.ok) {
+        const err = await prepareRes.json()
+        throw new Error(err.error || "Failed to build transaction")
+      }
+
+      const { unsigned_xdr } = await prepareRes.json()
+
+      // Step 3: Sign with Freighter (client-side, key never leaves browser)
+      setInvokeStatus("signing")
+      const signedXdr = await signWithFreighter(unsigned_xdr, NETWORKS.testnet)
+
+      // Step 4: Submit signed transaction
+      setInvokeStatus("submitting")
+      const submitRes = await fetch(`${base}/api/soroban/submit-invoke`, {
+        method: "POST",
+        headers,
+        body: JSON.stringify({
+          session_id: sessionId,
+          signed_xdr: signedXdr,
+          contract_id: contractId.trim(),
+          function_name: functionName.trim(),
           parameters,
         }),
       })
-      const data = await res.json()
-      if (!res.ok || !data.success) {
+
+      const data = await submitRes.json()
+      if (!submitRes.ok || !data.success) {
         setInvokeError(data.error || "Invocation failed")
       } else {
         setInvokeResult(data)
@@ -74,6 +109,7 @@ export default function ContractInteraction({ sessionId, authToken, apiBaseUrl }
       setInvokeError(err.message || "Network error")
     } finally {
       setInvoking(false)
+      setInvokeStatus("idle")
     }
   }
 
@@ -151,21 +187,16 @@ export default function ContractInteraction({ sessionId, authToken, apiBaseUrl }
             value={paramsRaw}
             onChange={(e) => setParamsRaw(e.target.value)}
           />
-          <input
-            className={inputCls}
-            type="password"
-            placeholder="Invoker secret key (S...)"
-            value={invokerSecret}
-            onChange={(e) => setInvokerSecret(e.target.value)}
-            required
-          />
-
           <Button
             type="submit"
             disabled={invoking}
             className="bg-blue-600 hover:bg-blue-700 text-white text-xs py-1.5"
           >
-            {invoking ? "Invoking…" : "Invoke"}
+            {invokeStatus === "connecting" && "Connecting to Freighter..."}
+            {invokeStatus === "building" && "Building transaction..."}
+            {invokeStatus === "signing" && "Waiting for signature..."}
+            {invokeStatus === "submitting" && "Submitting..."}
+            {invokeStatus === "idle" && (invoking ? "Invoking..." : "Invoke with Freighter")}
           </Button>
         </form>
 

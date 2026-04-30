@@ -151,15 +151,19 @@ def _save_invocation_record(instance_dir: str, record: dict) -> None:
 @check_friendbot_limits()
 def invoke_contract(current_user):
     """
-    Call a function on a deployed Soroban contract.
+    [DEPRECATED] Call a function on a deployed Soroban contract.
+    
+    SECURITY WARNING: This endpoint accepts secret keys and is deprecated.
+    Use /api/soroban/prepare-invoke and /api/soroban/submit-invoke with Freighter wallet instead.
+    This endpoint will be removed in a future version.
 
     Request JSON:
-        session_id      (int)       — active session ID
-        contract_id     (str)       — deployed contract address (C...)
-        function_name   (str)       — contract function to call
-        parameters      (list[str]) — typed params e.g. ["u32:42", "address:G...", "str:hi"]
-        invoker_secret  (str)       — Stellar secret key of the invoking account
-        fund_account    (bool)      — fund via Friendbot if needed (default: true)
+        session_id      (int)       - active session ID
+        contract_id     (str)       - deployed contract address (C...)
+        function_name   (str)       - contract function to call
+        parameters      (list[str]) - typed params e.g. ["u32:42", "address:G...", "str:hi"]
+        invoker_secret  (str)       - Stellar secret key of the invoking account [SECURITY RISK]
+        fund_account    (bool)      - fund via Friendbot if needed (default: true)
 
     Response JSON:
         success, result, transaction_hash, network, invoker_public_key,
@@ -406,6 +410,213 @@ def get_contract_state(current_user, session_id, contract_id):
             "contract_id": contract_id,
         })
         return jsonify({"success": False, "error": "An error occurred while fetching contract state"}), 500
+
+
+# ---------------------------------------------------------------------------
+# POST /api/soroban/prepare-invoke
+# ---------------------------------------------------------------------------
+
+@soroban_invoke_bp.route("/prepare-invoke", methods=["POST"])
+@token_required
+@rate_limit('soroban_invoke')
+@validate_soroban_request(
+    require_contract_id=True,
+    require_function_name=True,
+    require_secret_key=False,
+    require_parameters=True
+)
+def prepare_invoke_transaction(current_user):
+    """
+    Build an unsigned transaction for contract invocation.
+    
+    Request JSON:
+        session_id      (int)       - active session ID
+        contract_id     (str)       - deployed contract address (C...)
+        function_name   (str)       - contract function to call
+        parameters      (list[str]) - typed params e.g. ["u32:42", "address:G...", "str:hi"]
+        public_key      (str)       - Stellar public key of the invoking account
+    
+    Response JSON:
+        success, unsigned_xdr, network
+    """
+    try:
+        data = request.get_json()
+        session_id = data.get("session_id")
+        contract_id = (data.get("contract_id") or "").strip()
+        function_name = (data.get("function_name") or "").strip()
+        public_key = (data.get("public_key") or "").strip()
+        parameters = data.get("parameters") or []
+
+        session = Session.query.filter_by(
+            id=session_id, user_id=current_user.id, is_active=True
+        ).first()
+        if not session:
+            return jsonify({"success": False, "error": "Session not found or access denied"}), 404
+
+        instance_dir = session.instance_dir
+        if not instance_dir or not os.path.isdir(instance_dir):
+            return jsonify({"success": False, "error": "Session workspace not found"}), 404
+
+        sdk_ok, sdk_err = _get_stellar_sdk()
+        if not sdk_ok:
+            return jsonify({"success": False, "error": sdk_err}), 500
+
+        from stellar_sdk import SorobanServer, TransactionBuilder
+        from stellar_sdk.exceptions import NotFoundError
+
+        # Validate public key format
+        try:
+            from stellar_sdk import Keypair
+            keypair = Keypair.from_public_key(public_key)
+        except Exception:
+            return jsonify({"success": False, "error": "Invalid public key format"}), 400
+
+        logger.info(
+            "User %s preparing invoke %s::%s with account %s",
+            current_user.username, contract_id, function_name, public_key,
+        )
+
+        server = SorobanServer(STELLAR_TESTNET_RPC)
+
+        try:
+            sc_params = [_parse_param(p) for p in parameters]
+        except Exception as exc:
+            return jsonify({"success": False, "error": f"Invalid parameter format: {exc}"}), 400
+
+        try:
+            source_account = server.load_account(public_key)
+        except NotFoundError:
+            return jsonify({
+                "success": False,
+                "error": f"Account {public_key} not found. Please fund it first."
+            }), 404
+
+        tx = (
+            TransactionBuilder(
+                source_account=source_account,
+                network_passphrase=STELLAR_TESTNET_NETWORK_PASSPHRASE,
+                base_fee=100,
+            )
+            .set_timeout(30)
+            .append_invoke_contract_function_op(
+                contract_id=contract_id,
+                function_name=function_name,
+                parameters=sc_params,
+            )
+            .build()
+        )
+        tx = server.prepare_transaction(tx)
+
+        return jsonify({
+            "success": True,
+            "unsigned_xdr": tx.to_xdr(),
+            "network": "testnet",
+        }), 200
+
+    except Exception as e:
+        logger.exception("Prepare invoke transaction error")
+        capture_exception(e, {"route": "soroban_invoke.prepare_invoke_transaction", "user_id": current_user.id})
+        return jsonify({"success": False, "error": "An error occurred while preparing transaction"}), 500
+
+
+# ---------------------------------------------------------------------------
+# POST /api/soroban/submit-invoke
+# ---------------------------------------------------------------------------
+
+@soroban_invoke_bp.route("/submit-invoke", methods=["POST"])
+@token_required
+@rate_limit('soroban_invoke')
+def submit_signed_invoke_transaction(current_user):
+    """
+    Submit a signed contract invocation transaction.
+    
+    Request JSON:
+        session_id      (int)  - active session ID
+        signed_xdr      (str)  - signed transaction XDR
+        contract_id     (str)  - contract ID for record keeping
+        function_name   (str)  - function name for record keeping
+        parameters      (list) - parameters for record keeping
+    
+    Response JSON:
+        success, result, transaction_hash, network, invoker_public_key,
+        contract_id, function_name, explorer_url
+    """
+    try:
+        data = request.get_json()
+        session_id = data.get("session_id")
+        signed_xdr = data.get("signed_xdr")
+        contract_id = data.get("contract_id", "")
+        function_name = data.get("function_name", "")
+        parameters = data.get("parameters", [])
+
+        if not signed_xdr:
+            return jsonify({"success": False, "error": "signed_xdr is required"}), 400
+
+        session = Session.query.filter_by(
+            id=session_id, user_id=current_user.id, is_active=True
+        ).first()
+        if not session:
+            return jsonify({"success": False, "error": "Session not found or access denied"}), 404
+
+        instance_dir = session.instance_dir
+        if not instance_dir or not os.path.isdir(instance_dir):
+            return jsonify({"success": False, "error": "Session workspace not found"}), 404
+
+        sdk_ok, sdk_err = _get_stellar_sdk()
+        if not sdk_ok:
+            return jsonify({"success": False, "error": sdk_err}), 500
+
+        from stellar_sdk import SorobanServer, TransactionEnvelope
+
+        server = SorobanServer(STELLAR_TESTNET_RPC)
+
+        # Submit the signed transaction
+        try:
+            envelope = TransactionEnvelope.from_xdr(signed_xdr, STELLAR_TESTNET_NETWORK_PASSPHRASE)
+            submit_response = server.send_transaction(envelope)
+        except Exception as exc:
+            return jsonify({"success": False, "error": f"Invalid transaction: {exc}"}), 400
+
+        # Wait for completion
+        invoke_result = _wait_for_transaction(server, submit_response.hash)
+        if not invoke_result["success"]:
+            return jsonify({
+                "success": False,
+                "error": f"Invocation failed: {invoke_result['error']}",
+                "transaction_hash": submit_response.hash,
+            }), 422
+
+        # Extract invoker public key from the transaction
+        invoker_public = str(envelope.transaction.operations[0].source_account)
+
+        # Save invocation record
+        record = {
+            "contract_id": contract_id,
+            "function_name": function_name,
+            "parameters": parameters,
+            "result": invoke_result.get("result"),
+            "transaction_hash": submit_response.hash,
+            "invoker_public_key": invoker_public,
+            "network": "testnet",
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        }
+        _save_invocation_record(instance_dir, record)
+
+        logger.info(
+            "Signed invocation successful by %s: %s::%s tx=%s",
+            current_user.username, contract_id, function_name, submit_response.hash,
+        )
+
+        return jsonify({
+            "success": True,
+            **record,
+            "explorer_url": f"https://stellar.expert/explorer/testnet/tx/{submit_response.hash}",
+        }), 200
+
+    except Exception as e:
+        logger.exception("Submit invoke transaction error")
+        capture_exception(e, {"route": "soroban_invoke.submit_signed_invoke_transaction", "user_id": current_user.id})
+        return jsonify({"success": False, "error": "An error occurred during invocation"}), 500
 
 
 # ---------------------------------------------------------------------------
