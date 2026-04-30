@@ -542,6 +542,99 @@ def read_project_file(current_user, project_id):
         return jsonify({'success': False, 'error': 'An error occurred while reading the file'}), 500
 
 
+@project_bp.route('/<int:project_id>/files/tree', methods=['GET'])
+@token_required
+def get_project_file_tree(current_user, project_id):
+    """
+    Get the file system tree structure for a project.
+    Query parameter: path (optional, relative to project root)
+    """
+    try:
+        project = ProjectMetadata.query.filter_by(
+            id=project_id, user_id=current_user.id, is_active=True
+        ).first()
+
+        if not project:
+            return jsonify({'success': False, 'error': 'Project not found'}), 404
+
+        if not project.project_path:
+            return jsonify({'success': False, 'error': 'Project has no path configured'}), 400
+
+        import os
+        from pathlib import Path
+
+        # Get the requested path relative to project root
+        rel_path = request.args.get('path', '')
+        if rel_path:
+            # Security: ensure the relative path doesn't escape project root
+            if '..' in rel_path or rel_path.startswith('/'):
+                return jsonify({'success': False, 'error': 'Invalid path'}), 400
+            target_path = os.path.join(project.project_path, rel_path)
+        else:
+            target_path = project.project_path
+
+        # Ensure the target path is within the project directory
+        abs_project = os.path.realpath(project.project_path)
+        abs_target = os.path.realpath(target_path)
+        if not abs_target.startswith(abs_project):
+            return jsonify({'success': False, 'error': 'Path is outside project directory'}), 400
+
+        if not os.path.exists(abs_target):
+            return jsonify({'success': False, 'error': 'Path does not exist'}), 404
+
+        def build_tree_node(path, name, is_dir, relative_to):
+            """Build a tree node for a file or directory"""
+            node = {
+                'name': name,
+                'path': os.path.relpath(path, relative_to) if path != relative_to else '',
+                'type': 'directory' if is_dir else 'file',
+                'children': [] if is_dir else None
+            }
+            
+            if is_dir:
+                try:
+                    # Sort entries: directories first, then files, both alphabetically
+                    entries = sorted(os.listdir(path), key=lambda x: (os.path.isfile(os.path.join(path, x)), x.lower()))
+                    for entry in entries:
+                        entry_path = os.path.join(path, entry)
+                        entry_is_dir = os.path.isdir(entry_path)
+                        
+                        # Skip hidden files and directories
+                        if entry.startswith('.'):
+                            continue
+                            
+                        # Skip common ignore patterns
+                        if entry in ['node_modules', '__pycache__', '.git', 'target', 'dist', 'build']:
+                            continue
+                            
+                        child_node = build_tree_node(entry_path, entry, entry_is_dir, relative_to)
+                        if child_node:
+                            node['children'].append(child_node)
+                except (OSError, PermissionError):
+                    # Skip directories we can't read
+                    pass
+            
+            return node
+
+        # Build the tree starting from the target path
+        tree_root = build_tree_node(abs_target, os.path.basename(abs_target) or '.', os.path.isdir(abs_target), abs_project)
+
+        return jsonify({
+            'success': True,
+            'tree': tree_root,
+            'project_path': project.project_path
+        }), 200
+
+    except Exception as e:
+        logger.exception("Get project file tree error")
+        capture_exception(e, {
+            'route': 'project.get_project_file_tree',
+            'user_id': current_user.id,
+            'project_id': project_id,
+        })
+        return jsonify({'success': False, 'error': 'An error occurred while retrieving file tree'}), 500
+
+
 # ── Helper ────────────────────────────────────────────────────────────────────
 
 def _relative_path(absolute: str, base: str) -> str:
