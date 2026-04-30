@@ -15,6 +15,17 @@ from collections import defaultdict, deque
 
 logger = logging.getLogger(__name__)
 
+# Import error handling utilities
+try:
+    from server.utils.error_handlers import (
+        SecurityError, RateLimitError, ValidationError, StellarAddressError, 
+        FriendbotLimitError, SecurityLogger, breach_detector
+    )
+except ImportError:
+    # Fallback if error handlers aren't available
+    SecurityLogger = None
+    breach_detector = None
+
 # In-memory storage for rate limiting (Redis-ready for production)
 class MemoryRateLimiter:
     """In-memory rate limiter that can be easily replaced with Redis"""
@@ -258,7 +269,7 @@ def rate_limit(endpoint_type: str):
         def decorated_function(*args, **kwargs):
             # Get user and IP for rate limiting
             current_user = getattr(g, 'current_user', None)
-            user_id = current_user.id if current_user else 'anonymous'
+            user_id = str(current_user.id) if current_user else 'anonymous'
             ip_address = get_client_ip()
             
             # Get rate limit configuration
@@ -270,7 +281,17 @@ def rate_limit(endpoint_type: str):
             minute_key = f"{endpoint_type}:minute:{user_id}:{ip_address}"
             allowed, retry_after = rate_limiter.is_allowed(minute_key, per_minute, 60)
             if not allowed:
-                logger.warning(f"Rate limit exceeded (per-minute) for {endpoint_type}: user={user_id}, ip={ip_address}")
+                # Enhanced logging with security logger
+                if SecurityLogger:
+                    SecurityLogger.log_rate_limit_violation(
+                        user_id, ip_address, endpoint_type, 'per_minute', retry_after
+                    )
+                    # Check for breach patterns
+                    if breach_detector:
+                        breach_detector.record_attempt(user_id, ip_address)
+                else:
+                    logger.warning(f"Rate limit exceeded (per-minute) for {endpoint_type}: user={user_id}, ip={ip_address}")
+                
                 return jsonify({
                     "success": False,
                     "error": f"Rate limit exceeded for {limits.get('description', endpoint_type)}",
@@ -283,7 +304,14 @@ def rate_limit(endpoint_type: str):
             hour_key = f"{endpoint_type}:hour:{user_id}:{ip_address}"
             allowed, retry_after = rate_limiter.is_allowed(hour_key, per_hour, 3600)
             if not allowed:
-                logger.warning(f"Rate limit exceeded (per-hour) for {endpoint_type}: user={user_id}, ip={ip_address}")
+                # Enhanced logging with security logger
+                if SecurityLogger:
+                    SecurityLogger.log_rate_limit_violation(
+                        user_id, ip_address, endpoint_type, 'per_hour', retry_after
+                    )
+                else:
+                    logger.warning(f"Rate limit exceeded (per-hour) for {endpoint_type}: user={user_id}, ip={ip_address}")
+                
                 return jsonify({
                     "success": False,
                     "error": f"Rate limit exceeded for {limits.get('description', endpoint_type)}",
@@ -313,15 +341,31 @@ def validate_soroban_request(require_contract_id=True, require_function_name=Fal
             try:
                 data = request.get_json()
                 if not data:
+                    error_msg = "Request body must be JSON"
+                    if SecurityLogger:
+                        current_user = getattr(g, 'current_user', None)
+                        user_id = str(current_user.id) if current_user else 'anonymous'
+                        SecurityLogger.log_validation_error(
+                            user_id, get_client_ip(), 'request_body', '', error_msg
+                        )
                     return jsonify({
                         "success": False,
-                        "error": "Request body must be JSON"
+                        "error": error_msg
                     }), 400
+                
+                # Get user for logging
+                current_user = getattr(g, 'current_user', None)
+                user_id = str(current_user.id) if current_user else 'anonymous'
+                ip_address = get_client_ip()
                 
                 # Validate session_id (always required)
                 session_id = data.get('session_id')
                 is_valid, error = validate_session_id(session_id)
                 if not is_valid:
+                    if SecurityLogger:
+                        SecurityLogger.log_validation_error(
+                            user_id, ip_address, 'session_id', str(session_id), error
+                        )
                     return jsonify({
                         "success": False,
                         "error": error
@@ -332,6 +376,10 @@ def validate_soroban_request(require_contract_id=True, require_function_name=Fal
                     contract_id = data.get('contract_id')
                     is_valid, error = validate_stellar_address(contract_id, 'contract_id')
                     if not is_valid:
+                        if SecurityLogger:
+                            SecurityLogger.log_validation_error(
+                                user_id, ip_address, 'contract_id', str(contract_id), error
+                            )
                         return jsonify({
                             "success": False,
                             "error": error
@@ -342,6 +390,10 @@ def validate_soroban_request(require_contract_id=True, require_function_name=Fal
                     function_name = data.get('function_name')
                     is_valid, error = validate_function_name(function_name)
                     if not is_valid:
+                        if SecurityLogger:
+                            SecurityLogger.log_validation_error(
+                                user_id, ip_address, 'function_name', str(function_name), error
+                            )
                         return jsonify({
                             "success": False,
                             "error": error
@@ -352,6 +404,10 @@ def validate_soroban_request(require_contract_id=True, require_function_name=Fal
                     secret_key = data.get('deployer_secret') or data.get('invoker_secret')
                     is_valid, error = validate_stellar_address(secret_key, 'secret_key')
                     if not is_valid:
+                        if SecurityLogger:
+                            SecurityLogger.log_validation_error(
+                                user_id, ip_address, 'secret_key', '[REDACTED]', error
+                            )
                         return jsonify({
                             "success": False,
                             "error": error
@@ -362,6 +418,10 @@ def validate_soroban_request(require_contract_id=True, require_function_name=Fal
                     parameters = data.get('parameters', [])
                     is_valid, error = validate_parameters(parameters)
                     if not is_valid:
+                        if SecurityLogger:
+                            SecurityLogger.log_validation_error(
+                                user_id, ip_address, 'parameters', str(parameters)[:100], error
+                            )
                         return jsonify({
                             "success": False,
                             "error": error
@@ -371,6 +431,14 @@ def validate_soroban_request(require_contract_id=True, require_function_name=Fal
                 
             except Exception as e:
                 logger.error(f"Validation error: {str(e)}")
+                if SecurityLogger:
+                    current_user = getattr(g, 'current_user', None)
+                    user_id = str(current_user.id) if current_user else 'anonymous'
+                    SecurityLogger.log_security_incident(
+                        user_id, get_client_ip(), 'validation_exception',
+                        {'error': str(e), 'traceback': str(e.__traceback__)},
+                        'medium'
+                    )
                 return jsonify({
                     "success": False,
                     "error": "Request validation failed"
@@ -391,6 +459,11 @@ def check_friendbot_limits():
                     # Friendbot not requested, proceed normally
                     return f(*args, **kwargs)
                 
+                # Get user for logging
+                current_user = getattr(g, 'current_user', None)
+                user_id = str(current_user.id) if current_user else 'anonymous'
+                ip_address = get_client_ip()
+                
                 # Extract account information for tracking
                 secret_key = data.get('deployer_secret') or data.get('invoker_secret')
                 if not secret_key:
@@ -401,11 +474,11 @@ def check_friendbot_limits():
                     from stellar_sdk import Keypair
                     keypair = Keypair.from_secret(secret_key)
                     account_key = f"friendbot:account:{keypair.public_key}"
+                    public_key = keypair.public_key
                 except Exception:
                     # Invalid secret key, will fail later in validation
                     return f(*args, **kwargs)
                 
-                ip_address = get_client_ip()
                 ip_key = f"friendbot:ip:{ip_address}"
                 
                 # Check limits
@@ -416,7 +489,14 @@ def check_friendbot_limits():
                 )
                 
                 if not allowed:
-                    logger.warning(f"Friendbot limit exceeded: account={account_key}, ip={ip_key}")
+                    # Enhanced logging with security logger
+                    if SecurityLogger:
+                        SecurityLogger.log_friendbot_abuse(
+                            user_id, ip_address, public_key, usage_info
+                        )
+                    else:
+                        logger.warning(f"Friendbot limit exceeded: account={account_key}, ip={ip_key}")
+                    
                     reset_time = usage_info['reset_time']
                     retry_after = int((reset_time - datetime.now()).total_seconds())
                     
@@ -437,6 +517,14 @@ def check_friendbot_limits():
                 
             except Exception as e:
                 logger.error(f"Friendbot limit check error: {str(e)}")
+                if SecurityLogger:
+                    current_user = getattr(g, 'current_user', None)
+                    user_id = str(current_user.id) if current_user else 'anonymous'
+                    SecurityLogger.log_security_incident(
+                        user_id, get_client_ip(), 'friendbot_limit_check_exception',
+                        {'error': str(e), 'traceback': str(e.__traceback__)},
+                        'low'
+                    )
                 return f(*args, **kwargs)  # Don't block on errors
         return decorated_function
     return decorator
