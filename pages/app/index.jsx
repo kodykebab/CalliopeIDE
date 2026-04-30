@@ -18,6 +18,7 @@ import {
     User,
     ChevronLeft,
     Zap,
+    Activity,
     Rocket,
     Github,
     GitPullRequest,
@@ -27,6 +28,8 @@ import { Button } from "@/components/ui/button"
 import { getPublicKey, signTransaction, isConnected } from "@stellar/freighter-api"
 import ContractInteraction from "@/components/ContractInteraction"
 import MonacoEditor from "@/components/MonacoEditor"
+import SimulationPanel from "@/components/SimulationPanel"
+import ContractEventLog from "@/components/ContractEventLog"
 import FileExplorer from "@/components/FileExplorer"
 
 // ── Config ─────────────────────────────────────────────────────────────────────
@@ -185,6 +188,9 @@ export default function IDEApp() {
     ])
     const [activeEditorPath, setActiveEditorPath] = useState("/workspace/src/contract.rs")
 
+    // ── Soroban session ────────────────────────────────────────────────────────
+    const [sorobanSessionId, setSorobanSessionId] = useState(null)
+
     // ── Deploy state ───────────────────────────────────────────────────────────
     const [isDeploying, setIsDeploying] = useState(false)
     const [contractId, setContractId]   = useState(null)
@@ -249,7 +255,29 @@ export default function IDEApp() {
                 return
             }
             setUser(userData)
-            
+
+            // Fetch or create a Soroban session for this user
+            try {
+                const sessRes = await fetch(`${BACKEND_URL}/sessions`, {
+                    headers: { Authorization: `Bearer ${token}` }
+                })
+                const sessData = await sessRes.json()
+                if (sessData.success && sessData.sessions && sessData.sessions.length > 0) {
+                    setSorobanSessionId(sessData.sessions[0].session_id)
+                } else {
+                    // Create a new session
+                    const newSess = await fetch(`${BACKEND_URL}/`, {
+                        headers: { Authorization: `Bearer ${token}` }
+                    })
+                    const newSessData = await newSess.json()
+                    if (newSessData.session && newSessData.session.session_id) {
+                        setSorobanSessionId(newSessData.session.session_id)
+                    }
+                }
+            } catch (err) {
+                console.warn("Failed to fetch soroban session", err)
+            }
+
             // Auto-setup or retrieve default project workspace
             try {
                 const projRes = await fetch(`${BACKEND_URL}/api/projects/list`, {
@@ -800,30 +828,26 @@ export default function IDEApp() {
                                     : "relative w-0 overflow-hidden",
                         ].join(" ")}
                     >
-                        <div className="flex items-center justify-between px-4 py-3 border-b border-gray-700 min-h-[48px]">
-                            <div className="flex gap-1">
-                                <button
-                                    onClick={() => setSidebarTab("explorer")}
-                                    className={`flex items-center gap-1 px-2 py-1 rounded text-xs font-medium transition-colors ${
-                                        sidebarTab === "explorer"
-                                            ? "bg-gray-700 text-white"
-                                            : "text-gray-400 hover:text-white"
-                                    }`}
-                                >
-                                    <FolderOpen className="w-3 h-3" />
-                                    Explorer
-                                </button>
-                                <button
-                                    onClick={() => setSidebarTab("contract")}
-                                    className={`flex items-center gap-1 px-2 py-1 rounded text-xs font-medium transition-colors ${
-                                        sidebarTab === "contract"
-                                            ? "bg-gray-700 text-white"
-                                            : "text-gray-400 hover:text-white"
-                                    }`}
-                                >
-                                    <Zap className="w-3 h-3" />
-                                    Contract
-                                </button>
+                        <div className="flex items-center justify-between px-2 py-2 border-b border-gray-700 min-h-[44px]">
+                            <div className="flex gap-0.5 overflow-x-auto scrollbar-none flex-1 min-w-0">
+                                {[
+                                    { id: "explorer", icon: <FolderOpen className="w-3 h-3 shrink-0" />, label: "Files" },
+                                    { id: "contract", icon: <Zap className="w-3 h-3 shrink-0" />, label: "Deploy" },
+                                    { id: "simulate", icon: <Zap className="w-3 h-3 shrink-0 text-yellow-400" />, label: "Sim" },
+                                    { id: "events",   icon: <Activity className="w-3 h-3 shrink-0 text-purple-400" />, label: "Events" },
+                                ].map(({ id, icon, label }) => (
+                                    <button
+                                        key={id}
+                                        onClick={() => setSidebarTab(id)}
+                                        className={`flex items-center gap-1 px-2 py-1 rounded text-xs font-medium transition-colors whitespace-nowrap shrink-0 ${
+                                            sidebarTab === id
+                                                ? "bg-gray-700 text-white"
+                                                : "text-gray-400 hover:text-white"
+                                        }`}
+                                    >
+                                        {icon}{label}
+                                    </button>
+                                ))}
                             </div>
                             <Button
                                 variant="ghost"
@@ -853,6 +877,31 @@ export default function IDEApp() {
                                     sessionId={null}
                                     authToken={null}
                                 />
+                            )}
+
+                            {sidebarTab === "simulate" && (
+                                sorobanSessionId ? (
+                                    <SimulationPanel
+                                        sessionId={sorobanSessionId}
+                                        authToken={getToken()}
+                                        apiBaseUrl={BACKEND_URL}
+                                        mode="invoke"
+                                    />
+                                ) : (
+                                    <p className="p-4 text-xs text-gray-500">Setting up session…</p>
+                                )
+                            )}
+
+                            {sidebarTab === "events" && (
+                                sorobanSessionId ? (
+                                    <ContractEventLog
+                                        sessionId={sorobanSessionId}
+                                        authToken={getToken()}
+                                        apiBaseUrl={BACKEND_URL}
+                                    />
+                                ) : (
+                                    <p className="p-4 text-xs text-gray-500">Setting up session…</p>
+                                )
                             )}
                         </div>
 

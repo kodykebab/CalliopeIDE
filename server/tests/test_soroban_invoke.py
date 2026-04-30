@@ -258,6 +258,160 @@ class TestGetContractState:
 # Unit tests for helpers
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# GET /api/soroban/events/<session_id>
+# ---------------------------------------------------------------------------
+
+class TestListContractEvents:
+    def test_session_not_found(self, client):
+        m.Session = _no_session()
+        resp = client.get("/api/soroban/events/99")
+        assert resp.status_code == 404
+
+    def test_empty_when_no_invocations(self, client, tmp_path):
+        d = str(tmp_path / "inst")
+        os.makedirs(d)
+        m.Session = _yes_session(d)
+        resp = client.get("/api/soroban/events/1")
+        assert resp.status_code == 200
+        data = resp.get_json()
+        assert data["success"] is True
+        assert data["events"] == []
+        assert data["total"] == 0
+
+    def test_returns_events_from_invocation_records(self, client, tmp_path):
+        d = str(tmp_path / "inst")
+        os.makedirs(d)
+        inv_dir = tmp_path / "inst" / ".invocations"
+        os.makedirs(inv_dir)
+
+        record = {
+            "contract_id": "CTEST123",
+            "function_name": "transfer",
+            "transaction_hash": "abc123",
+            "timestamp": "2026-04-29T10:00:00+00:00",
+            "events": [
+                {
+                    "type": "CONTRACT",
+                    "contract_id": "CTEST123",
+                    "topics": ["transfer"],
+                    "data": {"amount": 100},
+                }
+            ],
+        }
+        (inv_dir / "invoke_20260429T100000000000.json").write_text(
+            json.dumps(record)
+        )
+        m.Session = _yes_session(d)
+        resp = client.get("/api/soroban/events/1")
+        assert resp.status_code == 200
+        data = resp.get_json()
+        assert data["total"] == 1
+        evt = data["events"][0]
+        assert evt["type"] == "CONTRACT"
+        assert evt["contract_id"] == "CTEST123"
+        assert evt["topics"] == ["transfer"]
+        assert evt["transaction_hash"] == "abc123"
+        assert evt["invoked_function"] == "transfer"
+
+    def test_filter_by_contract_id(self, client, tmp_path):
+        d = str(tmp_path / "inst")
+        os.makedirs(d)
+        inv_dir = tmp_path / "inst" / ".invocations"
+        os.makedirs(inv_dir)
+
+        for i, cid in enumerate(["CAAAA", "CBBBB"]):
+            record = {
+                "contract_id": cid,
+                "function_name": "fn",
+                "transaction_hash": f"tx{i}",
+                "timestamp": "2026-04-29T10:00:00+00:00",
+                "events": [
+                    {"type": "CONTRACT", "contract_id": cid, "topics": ["evt"], "data": None}
+                ],
+            }
+            (inv_dir / f"invoke_2026042900000000000{i}.json").write_text(json.dumps(record))
+
+        m.Session = _yes_session(d)
+        resp = client.get("/api/soroban/events/1?contract_id=CAAAA")
+        assert resp.status_code == 200
+        data = resp.get_json()
+        assert data["total"] == 1
+        assert data["events"][0]["contract_id"] == "CAAAA"
+
+    def test_invocations_without_events_field_are_skipped(self, client, tmp_path):
+        d = str(tmp_path / "inst")
+        os.makedirs(d)
+        inv_dir = tmp_path / "inst" / ".invocations"
+        os.makedirs(inv_dir)
+
+        # Old-style record without events field
+        record = {
+            "contract_id": "CTEST",
+            "function_name": "hello",
+            "transaction_hash": "abc",
+        }
+        (inv_dir / "invoke_20260429T000000000000.json").write_text(json.dumps(record))
+
+        m.Session = _yes_session(d)
+        resp = client.get("/api/soroban/events/1")
+        assert resp.status_code == 200
+        assert resp.get_json()["total"] == 0
+
+
+# ---------------------------------------------------------------------------
+# Unit tests — _extract_soroban_events
+# ---------------------------------------------------------------------------
+
+class TestExtractSorobanEvents:
+    def test_empty_string_returns_empty(self):
+        assert m._extract_soroban_events("") == []
+
+    def test_none_returns_empty(self):
+        assert m._extract_soroban_events(None) == []  # type: ignore[arg-type]
+
+    def test_invalid_xdr_returns_empty(self):
+        assert m._extract_soroban_events("not-valid-xdr") == []
+
+    def test_diagnostic_events_are_filtered(self):
+        mock_event = MagicMock()
+        mock_event.type.name = "DIAGNOSTIC"
+
+        mock_meta = MagicMock()
+        mock_meta.v3.soroban_meta.events = [mock_event]
+
+        with patch("stellar_sdk.xdr.TransactionMeta.from_xdr", return_value=mock_meta), \
+             patch("stellar_sdk.StrKey"):
+            result = m._extract_soroban_events("fakexdr")
+
+        assert result == []
+
+    def test_contract_event_decoded(self):
+        from stellar_sdk import scval
+
+        mock_topic_val = MagicMock()
+        mock_data_val = MagicMock()
+
+        mock_event = MagicMock()
+        mock_event.type.name = "CONTRACT"
+        mock_event.contract_id = None
+        mock_event.body.v0.topics.sc_vec = [mock_topic_val]
+        mock_event.body.v0.data = mock_data_val
+
+        mock_meta = MagicMock()
+        mock_meta.v3.soroban_meta.events = [mock_event]
+
+        with patch("stellar_sdk.xdr.TransactionMeta.from_xdr", return_value=mock_meta), \
+             patch.object(m, "_scval_to_python", side_effect=["transfer_topic", "transfer_data"]):
+            result = m._extract_soroban_events("fakexdr")
+
+        assert len(result) == 1
+        assert result[0]["type"] == "CONTRACT"
+        assert result[0]["contract_id"] is None
+        assert result[0]["topics"] == ["transfer_topic"]
+        assert result[0]["data"] == "transfer_data"
+
+
 class TestParseParam:
     def test_u32(self):
         from stellar_sdk import scval
