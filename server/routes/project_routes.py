@@ -6,11 +6,11 @@ from server.utils.auth_utils import token_required
 from server.utils.db_utils import create_project_metadata, update_project_metadata
 from server.utils.validators import sanitize_input
 from server.utils.context_builder import build_project_context, invalidate_cache
-import logging
+from server.utils.structured_logger import get_structured_logger
 from server.utils.monitoring import capture_exception
 
 project_bp = Blueprint('project', __name__, url_prefix='/api/projects')
-logger = logging.getLogger(__name__)
+logger = get_structured_logger()
 
 
 # ── Existing routes (unchanged) ───────────────────────────────────────────────
@@ -22,10 +22,24 @@ def create_project(current_user):
     try:
         data = request.get_json()
         if not data:
+            logger.warning(
+                "No data provided for project creation",
+                event_type='project_operation',
+                operation='create_project',
+                user_id=current_user.id,
+                reason='no_data'
+            )
             return jsonify({'success': False, 'error': 'No data provided'}), 400
 
         project_name = data.get('project_name')
         if not project_name:
+            logger.warning(
+                "Project name required for project creation",
+                event_type='project_operation',
+                operation='create_project',
+                user_id=current_user.id,
+                reason='missing_project_name'
+            )
             return jsonify({'success': False, 'error': 'Project name is required'}), 400
 
         project_name = sanitize_input(project_name, 255)
@@ -45,6 +59,18 @@ def create_project(current_user):
             project_path=project_path,
         )
 
+        logger.info(
+            f"Project created successfully: {project_name}",
+            event_type='project_operation',
+            operation='project_created',
+            user_id=current_user.id,
+            project_id=project.id,
+            project_name=project_name,
+            project_type=project_type,
+            language=language,
+            framework=framework
+        )
+
         return jsonify({
             'success': True,
             'message': 'Project created successfully',
@@ -52,9 +78,25 @@ def create_project(current_user):
         }), 201
 
     except ValueError as e:
+        logger.warning(
+            f"Validation error in project creation: {str(e)}",
+            event_type='project_operation',
+            operation='create_project',
+            user_id=current_user.id,
+            error_type='validation_error',
+            error_message=str(e)
+        )
         return jsonify({'success': False, 'error': str(e)}), 400
     except Exception as e:
-        logger.exception("Create project error")
+        logger.log_error_with_context(
+            e,
+            {
+                'event_type': 'project_operation',
+                'operation': 'create_project',
+                'user_id': current_user.id,
+                'project_name': data.get('project_name') if data else None
+            }
+        )
         capture_exception(e, {'route': 'project.create_project', 'user_id': current_user.id})
         return jsonify({'success': False, 'error': 'An error occurred while creating the project'}), 500
 

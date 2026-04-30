@@ -68,6 +68,9 @@ def token_required(f):
     """Decorator to protect routes requiring authentication"""
     @wraps(f)
     def decorated(*args, **kwargs):
+        from server.utils.structured_logger import get_structured_logger
+        logger = get_structured_logger()
+        
         token = None
         
         if 'Authorization' in request.headers:
@@ -75,12 +78,28 @@ def token_required(f):
             try:
                 token = auth_header.split(' ')[1]
             except IndexError:
+                logger.warning(
+                    "Invalid authorization header format",
+                    event_type='auth_failure',
+                    reason='invalid_header_format',
+                    endpoint=request.endpoint,
+                    method=request.method,
+                    ip_address=request.remote_addr
+                )
                 return jsonify({
                     'success': False,
                     'error': 'Invalid authorization header format. Use: Bearer <token>'
                 }), 401
         
         if not token:
+            logger.warning(
+                "Authentication token missing",
+                event_type='auth_failure',
+                reason='token_missing',
+                endpoint=request.endpoint,
+                method=request.method,
+                ip_address=request.remote_addr
+            )
             return jsonify({
                 'success': False,
                 'error': 'Authentication token is missing'
@@ -89,12 +108,29 @@ def token_required(f):
         payload = decode_token(token)
         
         if not payload:
+            logger.warning(
+                "Invalid or expired token",
+                event_type='auth_failure',
+                reason='token_invalid_or_expired',
+                endpoint=request.endpoint,
+                method=request.method,
+                ip_address=request.remote_addr
+            )
             return jsonify({
                 'success': False,
                 'error': 'Invalid or expired token'
             }), 401
         
         if payload.get('type') != 'access':
+            logger.warning(
+                "Invalid token type",
+                event_type='auth_failure',
+                reason='invalid_token_type',
+                token_type=payload.get('type'),
+                endpoint=request.endpoint,
+                method=request.method,
+                ip_address=request.remote_addr
+            )
             return jsonify({
                 'success': False,
                 'error': 'Invalid token type'
@@ -103,16 +139,44 @@ def token_required(f):
         current_user = User.query.filter_by(id=payload['user_id']).first()
         
         if not current_user:
+            logger.warning(
+                "User not found for token",
+                event_type='auth_failure',
+                reason='user_not_found',
+                user_id=payload['user_id'],
+                endpoint=request.endpoint,
+                method=request.method,
+                ip_address=request.remote_addr
+            )
             return jsonify({
                 'success': False,
                 'error': 'User not found'
             }), 401
         
         if not current_user.is_active:
+            logger.warning(
+                "Account deactivated",
+                event_type='auth_failure',
+                reason='account_deactivated',
+                user_id=current_user.id,
+                username=current_user.username,
+                endpoint=request.endpoint,
+                method=request.method,
+                ip_address=request.remote_addr
+            )
             return jsonify({
                 'success': False,
                 'error': 'Account is deactivated'
             }), 403
+        
+        logger.log_auth_event(
+            event='authentication_successful',
+            user_id=current_user.id,
+            username=current_user.username,
+            endpoint=request.endpoint,
+            method=request.method,
+            ip_address=request.remote_addr
+        )
         
         return f(current_user, *args, **kwargs)
     

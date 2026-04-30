@@ -73,9 +73,14 @@ app.config['JSON_SORT_KEYS'] = False
 cors_origins = os.getenv('CORS_ORIGINS', 'http://localhost:3000,http://localhost:5173').split(',')
 CORS(app, resources={r"/*": {"origins": cors_origins}}, supports_credentials=True)
 
-# Initialize monitoring and error tracking
-app.logger = setup_logging("calliope-ide")
+# Initialize structured logging and error tracking
+structured_logger = setup_logging("calliope-ide")
+app.logger = structured_logger.logger
 init_sentry(app)
+
+# Setup request tracing and structured logging
+from server.utils.structured_logger import setup_structured_logging
+setup_structured_logging(app)
 
 # Initialize database and register blueprints
 init_db(app)
@@ -102,13 +107,40 @@ if LIMITER_AVAILABLE and os.getenv('RATE_LIMIT_ENABLED', 'true').lower() == 'tru
 
 # Issue #59: pre-build sandbox image at startup (non-blocking)
 def _init_docker():
+    from server.utils.structured_logger import get_structured_logger
+    logger = get_structured_logger()
+    
     if is_docker_available():
-        app.logger.info("Docker available — building sandbox image in background …")
-        ensure_sandbox_image()
+        logger.info(
+            "Docker available - building sandbox image in background",
+            event_type='docker_initialization',
+            docker_available=True,
+            action='building_sandbox_image'
+        )
+        try:
+            ensure_sandbox_image()
+            logger.info(
+                "Sandbox image built successfully",
+                event_type='docker_initialization',
+                docker_available=True,
+                action='sandbox_image_built',
+                success=True
+            )
+        except Exception as e:
+            logger.log_error_with_context(
+                e,
+                {
+                    'event_type': 'docker_initialization',
+                    'docker_available': True,
+                    'action': 'sandbox_image_build_failed'
+                }
+            )
     else:
-        app.logger.warning(
-            "Docker not available. Container sandbox disabled; "
-            "subprocess fallback will be used for code execution."
+        logger.warning(
+            "Docker not available. Container sandbox disabled; subprocess fallback will be used for code execution.",
+            event_type='docker_initialization',
+            docker_available=False,
+            fallback_mode='subprocess'
         )
 
 threading.Thread(target=_init_docker, daemon=True, name="sandbox-init").start()
@@ -129,6 +161,9 @@ def find_free_port() -> int:
 @token_required
 def create_session(current_user):
     """Create new AI agent session (PROTECTED)"""
+    from server.utils.structured_logger import get_structured_logger
+    logger = get_structured_logger()
+    
     global count
     
     with lock:
@@ -137,6 +172,15 @@ def create_session(current_user):
 
     user_id = current_user.id
     username = current_user.username
+    session_token = f"session_{idx}_{user_id}"
+    
+    logger.log_session_event(
+        event='session_creation_started',
+        session_id=session_token,
+        user_id=user_id,
+        username=username,
+        instance_index=idx
+    )
     
     # Create instance directory
     inst = f"instance{idx}_user{user_id}"
@@ -147,17 +191,31 @@ def create_session(current_user):
 
     # Issue #59: launch agent inside an isolated container when Docker is available
     container_id = None
+    isolation_mode = 'subprocess'
 
     if is_docker_available():
         container_id = container_manager.create_agent_container(
             port=port,
             instance_dir=os.path.abspath(inst),
-            session_id=f"session_{idx}_{user_id}",
+            session_id=session_token,
         )
         if container_id is None:
-            app.logger.warning(
-                "Container creation failed for session %d — falling back to subprocess", idx
+            logger.warning(
+                "Container creation failed for session %d - falling back to subprocess",
+                session_id=session_token,
+                user_id=user_id,
+                instance_index=idx,
+                failure_reason='container_creation_failed'
             )
+        else:
+            isolation_mode = 'container'
+    else:
+        logger.info(
+            "Docker not available - using subprocess fallback",
+            session_id=session_token,
+            user_id=user_id,
+            isolation_mode=isolation_mode
+        )
 
     if container_id is None:
         # Fallback: bare subprocess (dev / Docker-unavailable environments)
@@ -172,7 +230,7 @@ def create_session(current_user):
         # Create session in database
         session = create_session_for_user(
             user_id=user_id,
-            session_token=f"session_{idx}_{user_id}",
+            session_token=session_token,
             instance_dir=inst,
             port=port
         )
@@ -187,6 +245,18 @@ def create_session(current_user):
             'created_at': session.created_at.isoformat()
         }
         
+        logger.log_session_event(
+            event='session_created_successfully',
+            session_id=session_token,
+            user_id=user_id,
+            username=username,
+            instance_index=idx,
+            port=port,
+            isolation_mode=isolation_mode,
+            container_id=container_id,
+            instance_dir=inst
+        )
+        
         return jsonify({
             'success': True,
             'user': {
@@ -199,7 +269,20 @@ def create_session(current_user):
         }), 200
         
     except Exception as e:
-        print(f"Session creation error: {str(e)}")
+        logger.log_error_with_context(
+            e,
+            {
+                'session_id': session_token,
+                'user_id': user_id,
+                'username': username,
+                'instance_index': idx,
+                'port': port,
+                'container_id': container_id,
+                'instance_dir': inst,
+                'event_type': 'session_creation_failed'
+            }
+        )
+        
         # Best-effort cleanup if container was created
         if container_id:
             container_manager.destroy_agent_container(container_id)
@@ -453,10 +536,33 @@ def execute_code_internal(current_user):
             timeout = 5
         
         # Log the execution attempt
-        app.logger.info(f"User {current_user.username} (ID: {current_user.id}) executing code [sandbox: {'docker' if is_docker_available() else 'subprocess'}]")
+        from server.utils.structured_logger import get_structured_logger
+        logger = get_structured_logger()
+        
+        logger.log_execution_start(
+            command=code,
+            user_id=current_user.id,
+            username=current_user.username,
+            sandbox_type='docker' if is_docker_available() else 'subprocess',
+            timeout=timeout,
+            session_id=data.get('session_id')
+        )
         
         # Execute the code securely
         result = secure_execute(code, timeout=timeout)
+        
+        # Log execution completion
+        logger.log_execution_complete(
+            command=code,
+            status=result['status'],
+            duration_ms=result.get('execution_time', 0) * 1000,
+            user_id=current_user.id,
+            username=current_user.username,
+            sandbox_type='docker' if is_docker_available() else 'subprocess',
+            session_id=data.get('session_id'),
+            output_length=len(result.get('output', '')),
+            error_length=len(result.get('error', ''))
+        )
         
         # Try to log code execution to chat history if session_id is provided
         session_id = data.get('session_id')
@@ -534,7 +640,18 @@ def execute_code(current_user):
 
 @app.errorhandler(404)
 def not_found(error):
-    app.logger.warning(f"404 Not Found: {request.path}")
+    from server.utils.structured_logger import get_structured_logger
+    logger = get_structured_logger()
+    
+    logger.warning(
+        f"404 Not Found: {request.path}",
+        event_type='http_error',
+        status_code=404,
+        path=request.path,
+        method=request.method,
+        user_agent=request.headers.get('User-Agent'),
+        ip_address=request.remote_addr
+    )
     return jsonify({
         'success': False,
         'error': 'Endpoint not found',
@@ -544,9 +661,24 @@ def not_found(error):
 
 @app.errorhandler(500)
 def internal_error(error):
-    app.logger.error(f"500 Internal Error: {str(error)}", exc_info=True)
+    from server.utils.structured_logger import get_structured_logger
+    logger = get_structured_logger()
+    
+    logger.log_error_with_context(
+        error,
+        {
+            'event_type': 'http_error',
+            'status_code': 500,
+            'endpoint': request.path,
+            'method': request.method,
+            'user_agent': request.headers.get('User-Agent'),
+            'ip_address': request.remote_addr
+        }
+    )
+    
     from server.utils.monitoring import track_error
     track_error(error, {'endpoint': request.path, 'method': request.method})
+    
     return jsonify({
         'success': False,
         'error': 'Internal server error',
@@ -557,7 +689,20 @@ def internal_error(error):
 @app.errorhandler(Exception)
 def handle_exception(error):
     """Global exception handler for uncaught errors"""
-    app.logger.error(f"Unhandled exception: {str(error)}", exc_info=True)
+    from server.utils.structured_logger import get_structured_logger
+    logger = get_structured_logger()
+    
+    logger.log_error_with_context(
+        error,
+        {
+            'event_type': 'unhandled_exception',
+            'endpoint': request.path if request else 'Unknown',
+            'method': request.method if request else 'Unknown',
+            'user_agent': request.headers.get('User-Agent') if request else None,
+            'ip_address': request.remote_addr if request else None
+        }
+    )
+    
     from server.utils.monitoring import track_error
     track_error(error, {
         'endpoint': request.path if request else 'Unknown',

@@ -10,6 +10,21 @@ import dataclasses
 import flask
 from flask import Response, request, stream_with_context
 
+# Import structured logging for agent lifecycle logging
+try:
+    from server.utils.structured_logger import get_structured_logger
+    logger = get_structured_logger()
+except ImportError:
+    # Fallback to basic logging if structured logger not available in agent context
+    import logging
+    logger = logging.getLogger('calliope-agent')
+    logger.setLevel(logging.INFO)
+    if not logger.handlers:
+        handler = logging.StreamHandler()
+        formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+        handler.setFormatter(formatter)
+        logger.addHandler(handler)
+
 from server.utils.agent_validators import (
     validate_agent_input,
     sanitize_agent_input,
@@ -170,7 +185,7 @@ def execute_command(cmd: str, ctx=None) -> str:
         if ctx: ctx_print(ctx, blocked_msg)
         return blocked_msg
 
-    if ctx: ctx_print(ctx, f"Agent is executing command ```{cmd.replace('`', \"'\")}```")
+    if ctx: ctx_print(ctx, f'Agent is executing command ```{cmd.replace("`", "'")}```')
 
     if len(cmd) > 1000:
         return "ERROR: Command too long (max 1000 characters)"
@@ -462,6 +477,15 @@ Remember: You are a SELF-SUFFICIENT AUTONOMOUS AGENT. Explore, understand, and s
 
 
 def main(ctx):
+    # Log agent start
+    logger.info(
+        "Agent session started",
+        event_type='agent_lifecycle',
+        lifecycle_event='session_started',
+        agent_port=int(sys.argv[1]) if len(sys.argv) > 1 else None,
+        working_directory=os.getcwd()
+    )
+    
     model = genai.GenerativeModel(
         model_name="gemini-2.0-flash",
         generation_config={
@@ -475,7 +499,7 @@ def main(ctx):
 
     chat = model.start_chat(history=[])
 
-    # ── PR addition: build context-aware system prompt ────────────────────────
+    # PR addition: build context-aware system prompt
     system_prompt = build_prompt(get_prompt(), ctx.project_context)
 
     system_prompt_intro = """
@@ -534,7 +558,7 @@ Always respond in valid JSON format without any text outside the JSON structure.
                                 cmd = cmd[1:-1]
 
                             cmd_output = execute_command(cmd, ctx)
-                            ctx_print(ctx, f"CLI Output: ```{cmd_output[:1000].replace('`', \"'\")}```")
+                            ctx_print(ctx, f'CLI Output: ```{cmd_output[:1000].replace("`", "'")}```')
                             all_outputs.append(f"Command: {cmd}\nOutput: {cmd_output}")
 
                         full_output = "\n\n".join(all_outputs)
