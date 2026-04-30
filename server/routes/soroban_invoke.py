@@ -17,6 +17,12 @@ from pathlib import Path
 from flask import Blueprint, request, jsonify
 from server.utils.auth_utils import token_required
 from server.utils.monitoring import capture_exception
+from server.utils.soroban_rate_limiter import (
+    rate_limit,
+    validate_stellar_address,
+    validate_contract_function_name,
+    validate_parameter_list,
+)
 
 try:
     from server.models import Session
@@ -191,6 +197,7 @@ def _save_invocation_record(instance_dir: str, record: dict) -> None:
 
 @soroban_invoke_bp.route("/invoke", methods=["POST"])
 @token_required
+@rate_limit("invoke")
 def invoke_contract(current_user):
     """
     Call a function on a deployed Soroban contract.
@@ -220,9 +227,19 @@ def invoke_contract(current_user):
         if not contract_id:
             return jsonify({"success": False, "error": "contract_id is required"}), 400
 
+        # Validate contract address format
+        is_valid, error_msg = validate_stellar_address(contract_id, "contract")
+        if not is_valid:
+            return jsonify({"success": False, "error": f"Invalid contract_id: {error_msg}"}), 400
+
         function_name = (data.get("function_name") or "").strip()
         if not function_name:
             return jsonify({"success": False, "error": "function_name is required"}), 400
+
+        # Validate function name
+        is_valid, error_msg = validate_contract_function_name(function_name)
+        if not is_valid:
+            return jsonify({"success": False, "error": f"Invalid function_name: {error_msg}"}), 400
 
         invoker_secret = (data.get("invoker_secret") or "").strip()
         if not invoker_secret:
@@ -231,6 +248,11 @@ def invoke_contract(current_user):
         parameters = data.get("parameters") or []
         if not isinstance(parameters, list):
             return jsonify({"success": False, "error": "parameters must be a list"}), 400
+
+        # Validate parameters
+        is_valid, error_msg = validate_parameter_list(parameters)
+        if not is_valid:
+            return jsonify({"success": False, "error": error_msg}), 400
 
         session = Session.query.filter_by(
             id=session_id, user_id=current_user.id, is_active=True
@@ -465,6 +487,7 @@ def list_contract_events(current_user, session_id):
 
 @soroban_invoke_bp.route("/state/<int:session_id>/<contract_id>", methods=["GET"])
 @token_required
+@rate_limit("state_query")
 def get_contract_state(current_user, session_id, contract_id):
     """
     Fetch and decode the ledger state entries for a deployed contract.

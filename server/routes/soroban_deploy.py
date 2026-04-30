@@ -14,6 +14,11 @@ from pathlib import Path
 from flask import Blueprint, request, jsonify
 from server.utils.auth_utils import token_required
 from server.utils.monitoring import capture_exception
+from server.utils.soroban_rate_limiter import (
+    rate_limit,
+    validate_stellar_address,
+    track_friendbot_usage,
+)
 
 try:
     from server.models import Session
@@ -58,6 +63,7 @@ def _resolve_wasm_path(raw_path: str, instance_dir: str) -> str | None:
 
 @soroban_deploy_bp.route("/deploy", methods=["POST"])
 @token_required
+@rate_limit("deploy")
 def deploy_contract(current_user):
     """
     Deploy a compiled Soroban WASM contract to Stellar testnet.
@@ -135,6 +141,11 @@ def deploy_contract(current_user):
             return jsonify({"success": False, "error": "Invalid deployer_secret key"}), 400
 
         deployer_public = keypair.public_key
+        
+        # Validate public key format
+        is_valid, error_msg = validate_stellar_address(deployer_public, "account")
+        if not is_valid:
+            return jsonify({"success": False, "error": f"Invalid deployer key: {error_msg}"}), 400
         logger.info(
             f"User {current_user.username} deploying contract "
             f"from {wasm_path_raw} with account {deployer_public}"
@@ -148,6 +159,11 @@ def deploy_contract(current_user):
             try:
                 server.load_account(deployer_public)
             except NotFoundError:
+                # Check Friendbot rate limit
+                allowed, error_msg = track_friendbot_usage(deployer_public)
+                if not allowed:
+                    return jsonify({"success": False, "error": error_msg}), 429
+                
                 logger.info(f"Funding account {deployer_public} via Friendbot")
                 resp = _requests.get(f"{FRIENDBOT_URL}?addr={deployer_public}", timeout=15)
                 if not resp.ok:
