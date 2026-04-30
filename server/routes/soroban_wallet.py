@@ -1,4 +1,4 @@
-from flask import Blueprint, request, jsonify
+from flask import Blueprint, request, jsonify, g
 from stellar_sdk import (
     Keypair,
     Network,
@@ -9,6 +9,10 @@ from stellar_sdk import (
 from stellar_sdk.xdr import TransactionEnvelope
 import base64
 import os
+from server.middleware.rate_limiter import (
+    rate_limit, validate_stellar_address, get_client_ip
+)
+from server.utils.auth_utils import token_required
 
 wallet_bp = Blueprint("soroban_wallet", __name__)
 
@@ -31,7 +35,9 @@ def get_horizon_server(network: str) -> Server:
 
 
 @wallet_bp.route("/api/soroban/build-deploy-tx", methods=["POST"])
-def build_deploy_tx():
+@token_required
+@rate_limit('soroban_deploy')
+def build_deploy_tx(current_user):
     """
     Build an unsigned deployment transaction XDR.
     The frontend signs this with Freighter — no secret key
@@ -50,9 +56,10 @@ def build_deploy_tx():
     network = data.get("network", "testnet")
     fund_account = data.get("fund_account", True)
 
-    # Validate public key format
-    if not StrKey.is_valid_ed25519_public_key(public_key):
-        return jsonify({"error": "Invalid Stellar public key"}), 400
+    # Validate public key format using our validation
+    is_valid, error = validate_stellar_address(public_key, 'public_key')
+    if not is_valid:
+        return jsonify({"error": error}), 400
 
     if network not in HORIZON_URLS:
         return jsonify({"error": f"Unsupported network: {network}"}), 400
@@ -100,7 +107,9 @@ def build_deploy_tx():
 
 
 @wallet_bp.route("/api/soroban/submit-deploy", methods=["POST"])
-def submit_deploy():
+@token_required
+@rate_limit('soroban_deploy')
+def submit_deploy(current_user):
     """
     Accept a Freighter-signed XDR and submit it to the network.
     """

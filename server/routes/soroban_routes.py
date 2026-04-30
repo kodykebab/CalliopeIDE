@@ -15,6 +15,9 @@ import logging
 from pathlib import Path
 from flask import Blueprint, request, jsonify
 from server.utils.monitoring import capture_exception
+from server.middleware.rate_limiter import (
+    rate_limit, validate_soroban_request, get_client_ip
+)
 
 soroban_bp = Blueprint("soroban", __name__, url_prefix="/api/soroban")
 
@@ -67,6 +70,13 @@ def _check_rust_toolchain() -> tuple[bool, str]:
 
 @soroban_bp.route("/compile", methods=["POST"])
 @__import__('server.utils.auth_utils', fromlist=['token_required']).token_required
+@rate_limit('soroban_compile')
+@validate_soroban_request(
+    require_contract_id=False,
+    require_function_name=False,
+    require_secret_key=False,
+    require_parameters=False
+)
 def compile_contract(current_user):
     """
     Compile a Soroban Rust project to WASM.
@@ -86,12 +96,7 @@ def compile_contract(current_user):
     """
     try:
         data = request.get_json()
-        if not data:
-            return jsonify({"success": False, "error": "No data provided"}), 400
-
         session_id = data.get("session_id")
-        if not session_id:
-            return jsonify({"success": False, "error": "session_id is required"}), 400
 
         # Verify session belongs to current user
         session = Session.query.filter_by(
@@ -191,6 +196,7 @@ def compile_contract(current_user):
 
 @soroban_bp.route("/artifacts/<int:session_id>", methods=["GET"])
 @__import__('server.utils.auth_utils', fromlist=['token_required']).token_required
+@rate_limit('soroban_state')
 def list_artifacts(current_user, session_id):
     """
     List all .wasm artifacts in a session workspace.

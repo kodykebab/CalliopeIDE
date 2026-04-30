@@ -14,6 +14,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 from server.middleware.database import db, init_db
+from server.middleware.rate_limiter import rate_limiter, get_rate_limit_status
 from server.models import User, RefreshToken, Session, ChatHistory, ProjectMetadata
 from server.routes import auth_bp , chat_bp, project_bp, oauth_bp
 from server.routes.chat_routes import chat_bp
@@ -281,6 +282,38 @@ def monitoring_status(current_user):
         'success': True,
         'monitoring': get_monitoring_stats()
     }), 200
+
+
+@app.route('/api/rate-limits', methods=['GET'])
+@token_required
+def rate_limits_status(current_user):
+    """Get current rate limit status for the authenticated user"""
+    try:
+        from server.middleware.rate_limiter import get_client_ip
+        
+        user_id = str(current_user.id)
+        ip_address = get_client_ip()
+        
+        # Get status for all Soroban endpoints
+        endpoints = ['soroban_invoke', 'soroban_deploy', 'soroban_compile', 'soroban_state']
+        status = {}
+        
+        for endpoint in endpoints:
+            status[endpoint] = get_rate_limit_status(user_id, ip_address, endpoint)
+        
+        return jsonify({
+            'success': True,
+            'user_id': user_id,
+            'ip_address': ip_address,
+            'rate_limits': status
+        }), 200
+        
+    except Exception as e:
+        app.logger.error(f"Rate limits status error: {str(e)}")
+        return jsonify({
+            'success': False,
+            'error': 'Failed to retrieve rate limit status'
+        }), 500
 
 
 @app.route('/api/stats', methods=['GET'])

@@ -14,6 +14,10 @@ from pathlib import Path
 from flask import Blueprint, request, jsonify
 from server.utils.auth_utils import token_required
 from server.utils.monitoring import capture_exception
+from server.middleware.rate_limiter import (
+    rate_limit, validate_soroban_request, check_friendbot_limits,
+    get_client_ip
+)
 
 try:
     from server.models import Session
@@ -58,6 +62,14 @@ def _resolve_wasm_path(raw_path: str, instance_dir: str) -> str | None:
 
 @soroban_deploy_bp.route("/deploy", methods=["POST"])
 @token_required
+@rate_limit('soroban_deploy')
+@validate_soroban_request(
+    require_contract_id=False,
+    require_function_name=False,
+    require_secret_key=True,
+    require_parameters=False
+)
+@check_friendbot_limits()
 def deploy_contract(current_user):
     """
     Deploy a compiled Soroban WASM contract to Stellar testnet.
@@ -78,20 +90,9 @@ def deploy_contract(current_user):
     """
     try:
         data = request.get_json()
-        if not data:
-            return jsonify({"success": False, "error": "No data provided"}), 400
-
         session_id = data.get("session_id")
-        if not session_id:
-            return jsonify({"success": False, "error": "session_id is required"}), 400
-
         wasm_path_raw = data.get("wasm_path")
-        if not wasm_path_raw:
-            return jsonify({"success": False, "error": "wasm_path is required"}), 400
-
         deployer_secret = data.get("deployer_secret")
-        if not deployer_secret:
-            return jsonify({"success": False, "error": "deployer_secret is required"}), 400
 
         # Verify session
         session = Session.query.filter_by(
@@ -307,6 +308,7 @@ def _extract_contract_id(tx_result) -> str | None:
 
 @soroban_deploy_bp.route("/wasm/<int:session_id>", methods=["GET"])
 @token_required
+@rate_limit('soroban_state')
 def download_wasm(current_user, session_id):
     """
     Download a compiled WASM file from a session workspace.
@@ -340,6 +342,13 @@ def download_wasm(current_user, session_id):
 
 @soroban_deploy_bp.route("/prepare-upload", methods=["POST"])
 @token_required
+@rate_limit('soroban_deploy')
+@validate_soroban_request(
+    require_contract_id=False,
+    require_function_name=False,
+    require_secret_key=False,
+    require_parameters=False
+)
 def prepare_upload(current_user):
     """
     Build an unsigned transaction to upload contract WASM.
@@ -404,6 +413,13 @@ def prepare_upload(current_user):
 
 @soroban_deploy_bp.route("/prepare-create", methods=["POST"])
 @token_required
+@rate_limit('soroban_deploy')
+@validate_soroban_request(
+    require_contract_id=False,
+    require_function_name=False,
+    require_secret_key=False,
+    require_parameters=False
+)
 def prepare_create(current_user):
     """
     Build an unsigned transaction to create a contract instance.
@@ -451,6 +467,7 @@ def prepare_create(current_user):
 
 @soroban_deploy_bp.route("/submit-tx", methods=["POST"])
 @token_required
+@rate_limit('soroban_deploy')
 def submit_signed_tx(current_user):
     """
     Submit a signed transaction XDR to the network.
@@ -495,6 +512,7 @@ def submit_signed_tx(current_user):
 
 @soroban_deploy_bp.route("/deployments/<int:session_id>", methods=["GET"])
 @token_required
+@rate_limit('soroban_state')
 def list_deployments(current_user, session_id):
     """
     List deployment records stored in the session workspace.

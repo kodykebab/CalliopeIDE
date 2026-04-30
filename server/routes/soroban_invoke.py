@@ -16,6 +16,10 @@ from pathlib import Path
 from flask import Blueprint, request, jsonify
 from server.utils.auth_utils import token_required
 from server.utils.monitoring import capture_exception
+from server.middleware.rate_limiter import (
+    rate_limit, validate_soroban_request, check_friendbot_limits,
+    get_client_ip
+)
 
 try:
     from server.models import Session
@@ -137,6 +141,14 @@ def _save_invocation_record(instance_dir: str, record: dict) -> None:
 
 @soroban_invoke_bp.route("/invoke", methods=["POST"])
 @token_required
+@rate_limit('soroban_invoke')
+@validate_soroban_request(
+    require_contract_id=True,
+    require_function_name=True,
+    require_secret_key=True,
+    require_parameters=True
+)
+@check_friendbot_limits()
 def invoke_contract(current_user):
     """
     Call a function on a deployed Soroban contract.
@@ -155,28 +167,11 @@ def invoke_contract(current_user):
     """
     try:
         data = request.get_json()
-        if not data:
-            return jsonify({"success": False, "error": "No data provided"}), 400
-
         session_id = data.get("session_id")
-        if not session_id:
-            return jsonify({"success": False, "error": "session_id is required"}), 400
-
         contract_id = (data.get("contract_id") or "").strip()
-        if not contract_id:
-            return jsonify({"success": False, "error": "contract_id is required"}), 400
-
         function_name = (data.get("function_name") or "").strip()
-        if not function_name:
-            return jsonify({"success": False, "error": "function_name is required"}), 400
-
         invoker_secret = (data.get("invoker_secret") or "").strip()
-        if not invoker_secret:
-            return jsonify({"success": False, "error": "invoker_secret is required"}), 400
-
         parameters = data.get("parameters") or []
-        if not isinstance(parameters, list):
-            return jsonify({"success": False, "error": "parameters must be a list"}), 400
 
         session = Session.query.filter_by(
             id=session_id, user_id=current_user.id, is_active=True
@@ -290,6 +285,7 @@ def invoke_contract(current_user):
 
 @soroban_invoke_bp.route("/invocations/<int:session_id>", methods=["GET"])
 @token_required
+@rate_limit('soroban_state')
 def list_invocations(current_user, session_id):
     """
     Return the invocation history stored in the session workspace.
@@ -335,6 +331,7 @@ def list_invocations(current_user, session_id):
 
 @soroban_invoke_bp.route("/state/<int:session_id>/<contract_id>", methods=["GET"])
 @token_required
+@rate_limit('soroban_state')
 def get_contract_state(current_user, session_id, contract_id):
     """
     Fetch and decode the ledger state entries for a deployed contract.
